@@ -1,0 +1,15 @@
+[project]
+name = "monitorubi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "httpx2>=2.5.0",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.2",
+    "textual>=8.2.8",
+    "textual-dev>=1.8.0",
+    "textual-plot>=0.10.1",
+]
