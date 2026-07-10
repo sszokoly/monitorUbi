@@ -57,18 +57,47 @@ async def request_devices(workspace_id, timeout=5.0, limit=None, offset=None):
     return response.json() if response else None
 
 
+async def request_clients(workspace_id, device_id, timeout=5.0, limit=None, offset=None):
+    url = f"https://api.ui.com/v1/mobility/workspaces/{workspace_id}/devices/{device_id}/clients?limit={limit}&offset={offset}"
+    
+    query_params = {}
+    if limit is not None:
+        query_params["limit"] = limit
+    if offset is not None:
+        query_params["offset"] = offset
+    
+    response, err = await make_request(
+        url, params=query_params, timeout=timeout
+    )
+    if err:
+        print(f"Request error: {err}")
+    return response.json() if response else None
+
+
+async def request_device_detail(workspace_id, device_id, timeout=5.0):
+    url = f"https://api.ui.com/v1/mobility/workspaces/{workspace_id}/devices/{device_id}"
+    response, err = await make_request(url, timeout=timeout)
+    if err:
+        print(f"Request error: {err}")
+    return response.json() if response else None
+
+
 if __name__ == "__main__":
     import time
 
     async def main():
         workspace_id = os.getenv("WORKSPACE_ID")
+        device_id = os.getenv("DEVICE_ID")
         results = await asyncio.gather(
             request_workspaces(),
             request_devices(workspace_id=workspace_id),
+            request_device_detail(workspace_id=workspace_id, device_id=device_id),
+            request_clients(workspace_id=workspace_id, device_id=device_id),
             return_exceptions=True
         )
-        print(results)
+
         for response in results:
+            print("==========")
             print(response)
 
     asyncio.run(main())
