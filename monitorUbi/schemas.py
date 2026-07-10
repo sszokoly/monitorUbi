@@ -118,20 +118,20 @@ if __name__ == "__main__":
         "type": "collection",
         "data": [
             {
-                "workspace_id": "019c0d0f-2016-7677-bf6a-6594c5546369",
-                "workspace_name": "sszokoly's Cloud",
+                "workspace_id": "019c0d0f-2018-7677-bfbf-6594c5546369",
+                "workspace_name": "Test Cloud 1",
                 "is_owner": true,
                 "status": "ACTIVE"
             },
             {
-                "workspace_id": "019ed77e-9eba-730d-80cd-5362aaab8830",
-                "workspace_name": "NetagenCBE's Cloud",
+                "workspace_id": "019ed77e-9ebb-730d-8080-5362aaab8830",
+                "workspace_name": "Test Cloud 2",
                 "is_owner": false,
                 "status": "ACTIVE"
             },
             {
-                "workspace_id": "019c0637-f0fd-7ba6-85bb-62e14a2ebdb1",
-                "workspace_name": "whagstrom's Cloud",
+                "workspace_id": "019c0637-f0ff-7ba6-8585-62e14a2ebdb1",
+                "workspace_name": "Test Cloud 3",
                 "is_owner": false,
                 "status": "ACTIVE"
             }
@@ -151,20 +151,20 @@ if __name__ == "__main__":
         "type": "collection",
         "data": [
             {
-                "id": "019edbe2-248c-74ff-80ea-beeced92acec",
-                "name": "CBE Vista Heights",
+                "id": "019edbe2-248c-74ff-8000-beeced92aeee",
+                "name": "UMR1",
                 "model": "UMR Industrial",
                 "state": "CONNECTED",
                 "firmware_version": "1.17.11",
-                "mac_address": "94:2A:6F:9A:0D:4A"
+                "mac_address": "12:34:56:78:90:12"
             },
             {
-                "id": "019bd81c-f4d5-7a2b-b2d1-26228433d2ec",
-                "name": "CSSD Living Spirit",
+                "id": "019bd81c-f4d5-7a2b-b2b2-26228433deee",
+                "name": "UMR2",
                 "model": "UMR Industrial",
                 "state": "DISCONNECTED",
                 "firmware_version": "1.17.11",
-                "mac_address": "94:2A:6F:9A:23:CA"
+                "mac_address": "01:02:03:04:05:06"
             }
         ],
         "offset": 0,
@@ -182,13 +182,13 @@ if __name__ == "__main__":
         "data": 
             { 
                 "id": "019edbe2-248c-74ff-80ea-beeced92acec",
-                "name": "CBE Vista Heights",
+                "name": "UMR1",
                 "model": "UMR Industrial",
                 "state": "CONNECTED",
                 "firmware_version": "1.17.11",
-                "mac_address": "94:2A:6F:9A:0D:4A",
+                "mac_address": "12:34:56:78:90:12",
                 "wan_source": "WAN",
-                "wan_ip": "70.77.78.5",
+                "wan_ip": "192.168.78.5",
                 "enabled_wans": [ "WAN", "LTE" ],
                 "isp": "Bell",
                 "lte_signal_level": "STRONG",
@@ -201,7 +201,7 @@ if __name__ == "__main__":
                 "poe_passthrough": false,
                 "device_mode": "ROUTER",
                 "wifi_enabled": true,
-                "wifi_ssid": "CBEVistaHeights",
+                "wifi_ssid": "UMR1",
                 "tx_power_level": "HIGH",
                 "vpn_profile_name": "",
                 "vpn_status": "",
@@ -211,8 +211,8 @@ if __name__ == "__main__":
                 "subscription_plan": "CLOUD",
                 "subscription_status": "ACTIVE",
                 "location": {
-                    "latitude": 51.05744,
-                    "longitude": -113.98842,
+                    "latitude": 50.00000,
+                    "longitude": -113.00000,
                     "last_updated": 1781873575628
                 }
             }
@@ -227,7 +227,7 @@ if __name__ == "__main__":
         "type": "collection",
         "data": [
             {
-                "mac": "ec:74:d7:8a:ac:79",
+                "mac": "ec:74:d7:ec:ec:ec",
                 "name": "",
                 "type": "WIRED",
                 "connection_status": "ONLINE",
@@ -235,8 +235,8 @@ if __name__ == "__main__":
                 "is_blocked": false
             },
             {
-                "mac": "d4:e9:8a:e2:36:f5",
-                "name": "sszokoly-pc1",
+                "mac": "d4:e9:8a:d4:d4:d4",
+                "name": "pc1",
                 "type": "WIRELESS",
                 "connection_status": "OFFLINE",
                 "ip_address": "",
@@ -244,8 +244,8 @@ if __name__ == "__main__":
                 "wifi_experience": 100
             },
             {
-                "mac": "8c:b8:7e:0a:6a:2c",
-                "name": "whagstrom-pc",
+                "mac": "8c:b8:7e:0a:0a:0a",
+                "name": "pc2",
                 "type": "WIRELESS",
                 "connection_status": "OFFLINE",
                 "ip_address": "",
