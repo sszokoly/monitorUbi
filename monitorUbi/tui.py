@@ -1,6 +1,13 @@
 from textual.app import App, ComposeResult
 from textual.containers import Container
 from textual.widgets import DataTable, Footer, Header, TabbedContent, TabPane
+from rich.text import Text
+
+green_status = Text("🟢", style="green")
+red_status = Text("🔴", style="red")
+wired = Text("💻", style="deep_sky_blue1")
+wireless = Text("🛜 ", style="orange1")
+signal = Text("▁▂▃▅▇", style="cyan")
 
 
 class UbiApp(App):
@@ -42,6 +49,8 @@ class UbiApp(App):
     def on_mount(self) -> None:
         self.title = "Ubiquiti UMR Monitor"
         self.sub_title = "Static layout"
+        self.console.options.legacy_windows = False
+        
 
         workspaces = self.query_one("#workspace-table", DataTable)
         workspaces.add_columns("Name", "Status", "Devices", "Clients")
@@ -54,19 +63,17 @@ class UbiApp(App):
         )
 
         devices = self.query_one("#device-table", DataTable)
-        devices.add_columns(
-            "Name".ljust(25),
-            "WAN IP".ljust(15),
-            "State".ljust(5),
-            "WAN".ljust(3), 
-            "Signal".ljust(6),
-            "Usage".rjust(9)
-        )
+        devices.add_column("Name", width=25)
+        devices.add_column("WAN IP", width=15)
+        devices.add_column("State", width=6)
+        devices.add_column("WAN", width=5)
+        devices.add_column("Signal", width=10)
+        devices.add_column("Usage", width=9)
         devices.add_rows(
             [
-                ("CBE Vista Heights", "192.168.78.5", "🟢", "WAN", "▁▂▃▅▇█", "0.74"),
-                ("CSSD Living Spirit", "10.0.0.2", "🔴", "LTE", "▁▂▃", "0.12"),
-                ("CBE St. Andrews Heights", "172.16.1.1", "🟢", "WAN", "▁▂▃▅█", "0.54"),
+                ("CBE Vista Heights", "192.168.78.5", green_status, "WAN", signal, "0.74"),
+                ("CSSD Living Spirit", "10.0.0.2", red_status, "LTE", "▁▂▃", "0.12"),
+                ("CBE St. Andrews Heights", "172.16.1.1", green_status, "WAN", "▁▂▃▅█", "0.54"),
             ]
         )
 
@@ -75,14 +82,14 @@ class UbiApp(App):
             "Name".ljust(25),
             "IP Address".ljust(15),
             "Status".ljust(6),
-            "Type".ljust(4),
+            "Type".ljust(5),
             "MAC Address".ljust(17)
         )
         clients.add_rows(
             [
-                ("", "192.168.105.154", "🟢", "🖥️", "ec:74:d7:ec:ec:ec"),
-                ("pc1", "192.168.105.54", "🔴", "🛜", "d4:e9:8a:d4:d4:d4"),
-                ("pc2", "192.168.105.51", "🟢", "🛜", "8c:b8:7e:0a:0a:0a"),
+                ("", "192.168.105.154", green_status, wired, "ec:74:d7:ec:ec:ec"),
+                ("pc1", "192.168.105.54", red_status, wireless, "d4:e9:8a:d4:d4:d4"),
+                ("pc2", "192.168.105.51", green_status, wireless, "8c:b8:7e:0a:0a:0a"),
             ]
         )
 
