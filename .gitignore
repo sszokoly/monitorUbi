@@ -220,3 +220,4 @@ uv.lock
 .vscode/
 .python-version
 .gitignore
+specs/*

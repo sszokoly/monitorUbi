@@ -1,5 +1,8 @@
+from monitorUbi.tui import UbiApp
+
 def main():
-    pass
+    app = UbiApp()
+    app.run()
 
 if __name__ == "__main__":
     main()
