@@ -1,6 +1,37 @@
 from uuid import UUID
-from typing import Optional, List
+from typing import Literal, Optional, List
 from pydantic import BaseModel, Field, IPvAnyAddress, field_validator
+
+
+CollectionType = Literal["collection"]
+SingleType = Literal["single"]
+WorkspaceStatus = Literal["ACTIVE", "PENDING", "INACTIVE", "DECLINED"]
+DeviceModel = Literal["UMR", "UMR Industrial", "UMR Ultra"]
+DeviceState = Literal[
+    "CONNECTED",
+    "DISCONNECTED",
+    "ADOPTING",
+    "ADOPTING_TIMEOUT",
+    "DOWNLOADING",
+    "UPGRADING",
+    "RESTARTING",
+    "FACTORY_RESET",
+    "GETTING_READY",
+    "RESTORING",
+    "NULL",
+    "DELETING",
+]
+WanSource = Literal["LTE", "WAN", "WIFIWAN", ""]
+LteSignalLevel = Literal["NO_SIGNAL", "POOR", "FAIR", "STRONG", ""]
+DeviceMode = Literal["ROUTER", "WANBRIDGE", "LTEPASS"]
+TxPowerLevel = Literal["HIGH", "MEDIUM", "LOW", ""]
+VpnStatus = Literal["CONNECTING", "CONNECTED", "DISCONNECTED", "FAILED", ""]
+SubscriptionPlan = Literal["FREE_TRIAL", "1GB", "5GB", "20GB", "2GB", "CLOUD", ""]
+SubscriptionStatus = Literal["ACTIVE", "INACTIVE", "PENDING", "FAILED"]
+ClientType = Literal["WIRED", "WIRELESS"]
+ClientConnectionStatus = Literal["ONLINE", "OFFLINE", "BLOCKED"]
+EnabledWan = Literal["LTE", "WAN", "WIFIWAN"]
+MacAddress = str
 
 
 class Workspace(BaseModel):
@@ -8,12 +39,12 @@ class Workspace(BaseModel):
     workspace_id: UUID
     workspace_name: str = Field(min_length=1, max_length=255)
     is_owner: bool
-    status: str = Field(pattern=r"^[A-Z_]+$")
+    status: WorkspaceStatus
 
 class WorkspaceCollectionResponse(BaseModel):
     """Model matching the Ubiquiti API's top-level JSON structure."""
     err: Optional[str] = None
-    type: str = Field(pattern=r"^collection$")  
+    type: CollectionType
     data: List[Workspace]
     trace_id: str
     offset: int
@@ -24,16 +55,29 @@ class DeviceSummary(BaseModel):
     """Model representing the lighter device data returned in lists."""
     id: UUID
     name: str = Field(min_length=1, max_length=255)
-    model: str
-    state: str = Field(pattern=r"^[A-Z_]+$")
+    model: DeviceModel
+    state: DeviceState
     firmware_version: str
-    mac_address: str = Field(pattern=r"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$")
+    mac_address: MacAddress
+
+    @field_validator("mac_address")
+    @classmethod
+    def validate_mac_address(cls, value):
+        """Allows empty MAC addresses for not-yet-initialized devices."""
+        if value == "":
+            return value
+        import re
+
+        if not re.fullmatch(r"([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})", value):
+            raise ValueError("Invalid MAC address")
+        return value
 
 class DeviceCollectionResponse(BaseModel):
     """Model matching the collection-level response API envelope."""
     err: Optional[str] = None
-    type: str = Field(pattern=r"^collection$")
+    type: CollectionType
     data: List[DeviceSummary]
+    trace_id: Optional[str] = None
     offset: int = Field(ge=0)
     limit: int = Field(ge=0)
     total: int = Field(ge=0)
@@ -48,15 +92,15 @@ class Device(BaseModel):
     """Model representing the detailed device attributes."""
     id: UUID
     name: str = Field(min_length=1, max_length=255)
-    model: str
-    state: str = Field(pattern=r"^[A-Z_]+$")
+    model: DeviceModel
+    state: DeviceState
     firmware_version: str
-    mac_address: str = Field(pattern=r"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$")
-    wan_source: str
+    mac_address: MacAddress
+    wan_source: WanSource
     wan_ip: Optional[IPvAnyAddress] = None
-    enabled_wans: List[str]
+    enabled_wans: List[EnabledWan]
     isp: Optional[str] = None
-    lte_signal_level: Optional[str] = None
+    lte_signal_level: Optional[LteSignalLevel] = None
     cellular_data_usage_bytes: int = Field(ge=0)
     cellular_data_limit_bytes: int = Field(ge=-1)
     memory_usage_percent: int = Field(ge=0, le=100)
@@ -64,31 +108,54 @@ class Device(BaseModel):
     client_count: int = Field(ge=0)
     host_address: IPvAnyAddress
     poe_passthrough: bool
-    device_mode: str
+    device_mode: DeviceMode
     wifi_enabled: bool
     wifi_ssid: Optional[str] = ""
-    tx_power_level: Optional[str] = ""
+    tx_power_level: Optional[TxPowerLevel] = ""
     vpn_profile_name: Optional[str] = ""
-    vpn_status: Optional[str] = ""
+    vpn_status: Optional[VpnStatus] = ""
     firewall_rule_names: List[str]
     routing_rule_names: List[str]
     ddns_profile_names: List[str]
-    subscription_plan: str
-    subscription_status: str
+    subscription_plan: SubscriptionPlan
+    subscription_status: SubscriptionStatus
     location: Optional[DeviceLocation] = None
+
+    @field_validator("mac_address")
+    @classmethod
+    def validate_mac_address(cls, value):
+        """Allows empty MAC addresses for not-yet-initialized devices."""
+        return DeviceSummary.validate_mac_address(value)
+
+    @field_validator("wan_ip", mode="before")
+    @classmethod
+    def empty_wan_ip_to_none(cls, value):
+        """Converts empty WAN IP addresses to None so validation passes."""
+        if value == "":
+            return None
+        return value
+
+    @field_validator("cellular_data_limit_bytes")
+    @classmethod
+    def reject_zero_cellular_data_limit(cls, value):
+        """The API uses -1 for unlimited; 0 is not a valid data limit."""
+        if value == 0:
+            raise ValueError("cellular_data_limit_bytes cannot be 0")
+        return value
 
 class DeviceResponse(BaseModel):
     """Model matching the API's top-level JSON envelope."""
     err: Optional[str] = None
-    type: str = Field(pattern=r"^single$")
+    type: SingleType
     data: Device
+    trace_id: Optional[str] = None
 
 class DeviceClient(BaseModel):
     """Model representing an individual client machine or user device."""
     mac: str = Field(pattern=r"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$")
-    name: Optional[str] = ""
-    type: str = Field(pattern=r"^(WIRED|WIRELESS)$")
-    connection_status: str = Field(pattern=r"^(ONLINE|OFFLINE)$")
+    name: str = ""
+    type: ClientType
+    connection_status: ClientConnectionStatus
     ip_address: Optional[IPvAnyAddress] = None
     is_blocked: bool
     # Optional field that only appears on WIRELESS clients (0 to 100%)
@@ -105,8 +172,9 @@ class DeviceClient(BaseModel):
 class ClientCollectionResponse(BaseModel):
     """Model matching the client collection API response envelope."""
     err: Optional[str] = None
-    type: str = Field(pattern=r"^collection$")
+    type: CollectionType
     data: List[DeviceClient]
+    trace_id: Optional[str] = None
     offset: int = Field(ge=0)
     limit: int = Field(ge=0)
     total: int = Field(ge=0)
