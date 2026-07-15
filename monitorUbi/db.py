@@ -69,7 +69,7 @@ if __name__ == "__main__":
     import asyncio
     
     async def main():
-        async with database_connection("sqlite.db") as conn:
+        async with database_connection("test.db") as conn:
             async with conn.execute(
                 "SELECT * FROM schema_migrations LIMIT 1"
             ) as cursor:
