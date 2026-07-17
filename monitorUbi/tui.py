@@ -49,7 +49,7 @@ class UbiApp(App):
             Static(self.service_status_text(), id="service-status"),
             id="service-panel",
         )
-        service_panel.border_title = "monitorUbi"
+        service_panel.border_title = "𝐦𝗼𝐧𝐢𝐭𝗼𝐫𝐔𝐁𝐈"
         yield service_panel
 
         devices_panel = Container(
@@ -61,7 +61,7 @@ class UbiApp(App):
             ),
             id="devices-panel",
         )
-        devices_panel.border_title = "Devices"
+        devices_panel.border_title = "𝐃𝐞𝐯𝐢𝐜𝐞𝐬"
         yield devices_panel
         yield Static(self.footer_text(), id="footer-menu")
 
