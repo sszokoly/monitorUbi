@@ -1,0 +1,14 @@
+[Unit]
+Description=Asynchronous Device Monitor Service
+After=network.target
+
+[Service]
+Type=simple
+User=monitoruser
+WorkingDirectory=/opt/device_monitor
+# Executes your headless daemon setup
+ExecStart=/opt/device_monitor/venv/bin/python service.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
