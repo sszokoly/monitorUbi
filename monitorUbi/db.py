@@ -3,12 +3,13 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
+from datetime import datetime
 
 import aiosqlite
-
+from schemas import Workspace
 
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
-
+DB_PATH = Path("monitorUbi.db")
 
 async def open_database(database_path: str | Path) -> aiosqlite.Connection:
     """Open a configured SQLite connection and apply pending migrations."""
@@ -65,10 +66,29 @@ async def database_connection(database_path: str | Path) -> AsyncIterator[aiosql
         await connection.close()
 
 
-# Add these functions to your existing db.py
-
-import json
-from datetime import datetime
+async def upsert_workspaces(workspaces: list[Workspace]):
+    async with database_connection(DB_PATH) as conn:
+        now_iso = datetime.now().isoformat()
+        
+        payloads = [
+            {**ws.model_dump(mode="json"), "last_seen_at": now_iso} 
+            for ws in workspaces
+        ]
+        
+        # 2. Use named placeholders (:key) to match dictionary keys
+        query = """
+            INSERT INTO workspaces (workspace_id, workspace_name, is_owner, status, last_seen_at)
+            VALUES (:workspace_id, :workspace_name, :is_owner, :status, :last_seen_at)
+            ON CONFLICT(workspace_id) DO UPDATE SET
+                workspace_name = excluded.workspace_name,
+                is_owner = excluded.is_owner,
+                status = excluded.status,
+                last_seen_at = excluded.last_seen_at;
+        """
+        
+        # 3. Use executemany to run all upserts efficiently in a single batch
+        await conn.executemany(query, payloads)
+        await conn.commit()
 
 
 async def upsert_device_metrics(connection: aiosqlite.Connection, payload: dict) -> None:

@@ -1,6 +1,6 @@
 from uuid import UUID
 from typing import Literal, Optional, List
-from pydantic import BaseModel, Field, IPvAnyAddress, field_validator
+from pydantic import BaseModel, Field, IPvAnyAddress, field_validator, field_serializer
 
 
 CollectionType = Literal["collection"]
@@ -40,6 +40,10 @@ class Workspace(BaseModel):
     workspace_name: str = Field(min_length=1, max_length=255)
     is_owner: bool
     status: WorkspaceStatus
+    
+    @field_serializer("is_owner")
+    def serialize_bool(self, v: bool) -> int:
+        return 1 if v else 0
 
 class WorkspaceCollectionResponse(BaseModel):
     """Model matching the Ubiquiti API's top-level JSON structure."""

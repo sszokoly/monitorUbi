@@ -38,7 +38,7 @@ async def request_workspaces(timeout=5.0):
     response, err = await make_request(url, timeout=timeout)
     if err:
         print(f"Request error: {err}")
-    return response.json() if response else None
+    return response.content if response else None
 
 async def request_devices(workspace_id, timeout=5.0, limit=None, offset=None):
     url = f"https://api.ui.com/v1/mobility/workspaces/{workspace_id}/devices"
@@ -54,7 +54,7 @@ async def request_devices(workspace_id, timeout=5.0, limit=None, offset=None):
     )
     if err:
         print(f"Request error: {err}")
-    return response.json() if response else None
+    return response.content if response else None
 
 
 async def request_device_clients(workspace_id, device_id, timeout=5.0, limit=None, offset=None):
@@ -71,7 +71,7 @@ async def request_device_clients(workspace_id, device_id, timeout=5.0, limit=Non
     )
     if err:
         print(f"Request error: {err}")
-    return response.json() if response else None
+    return response.content if response else None
 
 
 async def request_device_details(workspace_id, device_id, timeout=5.0):
@@ -79,7 +79,7 @@ async def request_device_details(workspace_id, device_id, timeout=5.0):
     response, err = await make_request(url, timeout=timeout)
     if err:
         print(f"Request error: {err}")
-    return response.json() if response else None
+    return response.content if response else None
 
 
 if __name__ == "__main__":
@@ -90,10 +90,10 @@ if __name__ == "__main__":
         device_id = os.getenv("DEVICE_ID")
         results = await asyncio.gather(
             request_workspaces(),
-            request_devices(workspace_id=workspace_id),
-            request_device_details(workspace_id=workspace_id, device_id=device_id),
-            request_device_clients(workspace_id=workspace_id, device_id=device_id),
-            return_exceptions=True
+            #request_devices(workspace_id=workspace_id),
+            #request_device_details(workspace_id=workspace_id, device_id=device_id),
+            #request_device_clients(workspace_id=workspace_id, device_id=device_id),
+            #return_exceptions=True
         )
 
         for response in results:

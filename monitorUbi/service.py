@@ -3,10 +3,26 @@ import asyncio
 import logging
 import signal
 from typing import Callable, Optional
-import client
-import db
+from db import upsert_workspaces
+from schemas import WorkspaceCollectionResponse
+from client import request_workspaces
 
 logger = logging.getLogger(__name__)
+
+WORKSPACE_FETCH_FREQ_SECS = 180
+DEVICE_FETCH_FREQ_SECS = 60
+
+
+async def fetch_worspaces():
+    content = await request_workspaces()
+    if content is None:
+        return
+    resp = WorkspaceCollectionResponse.model_validate_json(content)
+    if resp.data and not resp.err:
+        result = await upsert_workspaces(resp.data)
+
+
+
 
 class DeviceMonitorService:
     def __init__(self, on_refresh_callback: Optional[Callable[[], None]] = None):
@@ -78,4 +94,5 @@ async def run_headless_daemon():
 
 if __name__ == "__main__":
     # Running this file directly fires up the headless Linux daemon mode
-    asyncio.run(run_headless_daemon())
+    #asyncio.run(run_headless_daemon())
+    asyncio.run(fetch_worspaces())
