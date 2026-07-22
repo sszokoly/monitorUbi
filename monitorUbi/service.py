@@ -5,22 +5,39 @@ import signal
 from typing import Callable, Optional
 from db import upsert_workspaces
 from schemas import WorkspaceCollectionResponse
-from client import request_workspaces
+from client import request_workspaces, request_devices
 
 logger = logging.getLogger(__name__)
 
-WORKSPACE_FETCH_FREQ_SECS = 180
-DEVICE_FETCH_FREQ_SECS = 60
+WORKSPACES_FETCH_FREQ_SECS = 180
+DEVICES_FETCH_FREQ_SECS = 180
 
 
-async def fetch_worspaces():
-    content = await request_workspaces()
-    if content is None:
-        return
-    resp = WorkspaceCollectionResponse.model_validate_json(content)
-    if resp.data and not resp.err:
-        result = await upsert_workspaces(resp.data)
 
+async def workspaces_from_web(pause_time=WORKSPACES_FETCH_FREQ_SECS):
+    try:
+        content = await request_workspaces()
+        if content is None:
+            return
+        resp = WorkspaceCollectionResponse.model_validate_json(content)
+        if resp.data and not resp.err:
+            await upsert_workspaces(resp.data)
+        return [ws.model_dump(mode="json")["workspace_id"] for ws in resp.data]
+    except:
+        return []
+
+
+async def fetch_devices(pause_time=WORKSPACES_FETCH_FREQ_SECS):
+    try:
+        wp_ids = await fetch_workspaces()
+        if not wp_ids:
+            return
+        
+        tasks = [request_devices(wp_id) for wp_id in wp_ids]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return results
+    except:
+        return []
 
 
 
@@ -95,4 +112,5 @@ async def run_headless_daemon():
 if __name__ == "__main__":
     # Running this file directly fires up the headless Linux daemon mode
     #asyncio.run(run_headless_daemon())
-    asyncio.run(fetch_worspaces())
+    ws = asyncio.run(fetch_devices())
+    print(ws)
