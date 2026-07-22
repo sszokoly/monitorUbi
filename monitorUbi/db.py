@@ -9,7 +9,7 @@ import aiosqlite
 from schemas import Workspace
 
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
-DB_PATH = Path("monitorUbi.db")
+DB_PATH = Path("monitorUbi/monitorUbi.db")
 
 async def open_database(database_path: str | Path) -> aiosqlite.Connection:
     """Open a configured SQLite connection and apply pending migrations."""

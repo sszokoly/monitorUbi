@@ -221,3 +221,4 @@ uv.lock
 .python-version
 .gitignore
 specs/*
+monitorUbi/*.db
