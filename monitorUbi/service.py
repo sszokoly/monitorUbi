@@ -1,116 +1,254 @@
-# service.py
+"""Polling orchestration for typed Mobility API data."""
+
 import asyncio
-import logging
-import signal
-from typing import Callable, Optional
-from db import upsert_workspaces
-from schemas import WorkspaceCollectionResponse
-from client import request_workspaces, request_devices
+import inspect
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Protocol, TypeVar
+from uuid import UUID
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
-WORKSPACES_FETCH_FREQ_SECS = 180
-DEVICES_FETCH_FREQ_SECS = 180
-
+from monitorUbi.schemas import Device, DeviceClient, DeviceSummary, Workspace
 
 
-async def workspaces_from_web(pause_time=WORKSPACES_FETCH_FREQ_SECS):
-    try:
-        content = await request_workspaces()
-        if content is None:
-            return
-        resp = WorkspaceCollectionResponse.model_validate_json(content)
-        if resp.data and not resp.err:
-            await upsert_workspaces(resp.data)
-        return [ws.model_dump(mode="json")["workspace_id"] for ws in resp.data]
-    except:
-        return []
+DEFAULT_POLL_INTERVAL_SECONDS = 600.0
+DEFAULT_REQUESTS_PER_MINUTE = 90
+DEFAULT_MAX_CONCURRENT_REQUESTS = 4
+
+T = TypeVar("T")
 
 
-async def fetch_devices(pause_time=WORKSPACES_FETCH_FREQ_SECS):
-    try:
-        wp_ids = await fetch_workspaces()
-        if not wp_ids:
-            return
-        
-        tasks = [request_devices(wp_id) for wp_id in wp_ids]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return results
-    except:
-        return []
+class MobilityApi(Protocol):
+    """Typed API operations required by the monitoring service."""
+
+    async def list_workspaces(self) -> list[Workspace]: ...
+
+    async def list_devices(self, workspace_id: UUID) -> list[DeviceSummary]: ...
+
+    async def get_device(self, workspace_id: UUID, device_id: UUID) -> Device: ...
+
+    async def list_device_clients(
+        self, workspace_id: UUID, device_id: UUID
+    ) -> list[DeviceClient]: ...
 
 
+@dataclass(frozen=True)
+class DeviceSnapshot:
+    """Detailed device data together with the IDs required for persistence."""
 
-class DeviceMonitorService:
-    def __init__(self, on_refresh_callback: Optional[Callable[[], None]] = None):
-        self.on_refresh = on_refresh_callback
-        self._monitor_task: Optional[asyncio.Task] = None
-        self.is_running = False
+    workspace_id: UUID
+    device: Device
+    clients: tuple[DeviceClient, ...]
+
+
+class SnapshotStore(Protocol):
+    """Persistence operation required by the monitoring service."""
+
+    async def save_snapshot(
+        self,
+        workspaces: Sequence[Workspace],
+        devices: Sequence[DeviceSnapshot],
+        sampled_at: datetime,
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class SyncSummary:
+    """Concise result of one completed monitoring cycle."""
+
+    workspace_count: int
+    device_count: int
+    client_count: int
+    sampled_at: datetime
+
+
+RefreshCallback = Callable[[SyncSummary], Awaitable[None] | None]
+
+
+class _RequestPacer:
+    """Space API request starts to remain below the documented rate limit."""
+
+    def __init__(self, requests_per_minute: int) -> None:
+        if requests_per_minute < 1:
+            raise ValueError("requests_per_minute must be at least 1")
+        self._interval = 60 / requests_per_minute
+        self._lock = asyncio.Lock()
+        self._next_request_at = 0.0
+
+    async def wait_for_turn(self) -> None:
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            now = loop.time()
+            scheduled_at = max(now, self._next_request_at)
+            self._next_request_at = scheduled_at + self._interval
+        await asyncio.sleep(max(0.0, scheduled_at - loop.time()))
+
+
+class MonitorService:
+    """Collect API snapshots, persist them, and notify the caller after each poll."""
+
+    def __init__(
+        self,
+        api: MobilityApi,
+        store: SnapshotStore,
+        *,
+        poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+        requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE,
+        max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS,
+        on_refresh: RefreshCallback | None = None,
+    ) -> None:
+        if poll_interval_seconds <= 0:
+            raise ValueError("poll_interval_seconds must be greater than 0")
+        if max_concurrent_requests < 1:
+            raise ValueError("max_concurrent_requests must be at least 1")
+
+        self._api = api
+        self._store = store
+        self._poll_interval_seconds = poll_interval_seconds
+        self._on_refresh = on_refresh
+        self._request_pacer = _RequestPacer(requests_per_minute)
+        self._request_semaphore = asyncio.Semaphore(max_concurrent_requests)
+        self._poll_task: asyncio.Task[None] | None = None
+
+    @property
+    def is_running(self) -> bool:
+        """Whether a background polling task is active."""
+        return self._poll_task is not None and not self._poll_task.done()
 
     def start(self) -> None:
-        """Starts the asynchronous monitoring loop."""
-        if not self.is_running:
-            self.is_running = True
-            self._monitor_task = asyncio.create_task(self._run_loop())
-            logger.info("Device Monitor Service started.")
+        """Start polling from the current event loop if it is not already active."""
+        if self.is_running:
+            return
+        self._poll_task = asyncio.create_task(
+            self._run_loop(),
+            name="monitorubi-polling",
+        )
+        logger.info("Monitor service started")
 
     async def stop(self) -> None:
-        """Gracefully cancels the background loop for clean shutdown."""
-        if self.is_running and self._monitor_task:
-            self.is_running = False
-            self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass  # Safe, expected exit path
-            logger.info("Device Monitor Service stopped cleanly.")
+        """Cancel the active poll cycle or wait period and wait for shutdown."""
+        if self._poll_task is None:
+            return
+
+        poll_task = self._poll_task
+        self._poll_task = None
+        poll_task.cancel()
+        try:
+            await poll_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Monitor service stopped")
+
+    async def sync_once(self) -> SyncSummary:
+        """Fetch one complete typed snapshot and hand it to the persistence layer."""
+        sampled_at = datetime.now(timezone.utc)
+        workspaces = await self._call_api(self._api.list_workspaces)
+        workspace_snapshots = await asyncio.gather(
+            *(self._collect_workspace_snapshots(workspace) for workspace in workspaces)
+        )
+        devices = [
+            device_snapshot
+            for snapshots in workspace_snapshots
+            for device_snapshot in snapshots
+        ]
+
+        await self._store.save_snapshot(workspaces, devices, sampled_at)
+        return SyncSummary(
+            workspace_count=len(workspaces),
+            device_count=len(devices),
+            client_count=sum(len(device.clients) for device in devices),
+            sampled_at=sampled_at,
+        )
+
+    async def _collect_workspace_snapshots(
+        self, workspace: Workspace
+    ) -> list[DeviceSnapshot]:
+        summaries = await self._call_api(
+            lambda: self._api.list_devices(workspace.workspace_id)
+        )
+        return list(
+            await asyncio.gather(
+                *(
+                    self._collect_device_snapshot(workspace.workspace_id, summary)
+                    for summary in summaries
+                )
+            )
+        )
+
+    async def _collect_device_snapshot(
+        self, workspace_id: UUID, summary: DeviceSummary
+    ) -> DeviceSnapshot:
+        device, clients = await asyncio.gather(
+            self._call_api(lambda: self._api.get_device(workspace_id, summary.id)),
+            self._call_api(
+                lambda: self._api.list_device_clients(workspace_id, summary.id)
+            ),
+        )
+        return DeviceSnapshot(
+            workspace_id=workspace_id,
+            device=device,
+            clients=tuple(clients),
+        )
+
+    async def _call_api(self, operation: Callable[[], Awaitable[T]]) -> T:
+        await self._request_pacer.wait_for_turn()
+        async with self._request_semaphore:
+            return await operation()
 
     async def _run_loop(self) -> None:
-        """Continuous pipeline: REST Fetch -> DB Upsert -> UI Trigger."""
-        while self.is_running:
+        while True:
             try:
-                device_data = await client.fetch_device_status()
-                await db.upsert_device_metrics(device_data)
-                
-                # If running in TUI mode, notify the UI to refresh
-                if self.on_refresh:
-                    self.on_refresh()
-                    
-            except Exception as e:
-                logger.error(f"Error in service sync loop: {e}")
-                
-            await asyncio.sleep(5)
+                summary = await self.sync_once()
+                logger.info(
+                    "Sync completed: {workspaces} workspaces, {devices} devices, "
+                    "{clients} clients",
+                    workspaces=summary.workspace_count,
+                    devices=summary.device_count,
+                    clients=summary.client_count,
+                )
+                await self._notify_refresh(summary)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Monitor sync failed")
 
-# -------------------------------------------------------------------------
-# SYSTEMD INTEGRATION ENTRY POINT
-# This executes ONLY when running headless as a background Linux service
-# -------------------------------------------------------------------------
-async def run_headless_daemon():
-    """Wrapper to run the service stand-alone with OS signal handling."""
-    logging.basicConfig(level=logging.INFO)
-    
-    # Initialize connection pools on startup
-    await db.initialize_database() 
-    
-    service = DeviceMonitorService()
-    service.start()
+            await asyncio.sleep(self._poll_interval_seconds)
 
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
+    async def _notify_refresh(self, summary: SyncSummary) -> None:
+        if self._on_refresh is None:
+            return
+        result = self._on_refresh(summary)
+        if inspect.isawaitable(result):
+            await result
 
-    # Register OS termination hooks required by systemctl stop
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop_event.set)
-
-    # Keep alive until systemd triggers the stop event
-    await stop_event.wait()
-    
-    # Clean up tasks and close connection pools gracefully
-    await service.stop()
-    await db.close_database()
 
 if __name__ == "__main__":
-    # Running this file directly fires up the headless Linux daemon mode
-    #asyncio.run(run_headless_daemon())
-    ws = asyncio.run(fetch_devices())
-    print(ws)
+    from monitorUbi.client import MobilityApiClient
+    from monitorUbi.logging_setup import configure_logging
+
+    class ConsoleSnapshotStore:
+        """Example store that reports the typed snapshot instead of persisting it."""
+
+        async def save_snapshot(
+            self,
+            workspaces: Sequence[Workspace],
+            devices: Sequence[DeviceSnapshot],
+            sampled_at: datetime,
+        ) -> None:
+            client_count = sum(len(device.clients) for device in devices)
+            print(
+                f"Snapshot at {sampled_at.isoformat()}: "
+                f"{len(workspaces)} workspaces, {len(devices)} devices, "
+                f"{client_count} clients"
+            )
+
+    async def main() -> None:
+        configure_logging("headless")
+        async with MobilityApiClient() as api:
+            service = MonitorService(api, ConsoleSnapshotStore())
+            summary = await service.sync_once()
+        print(f"Sync summary: {summary}")
+
+    asyncio.run(main())
