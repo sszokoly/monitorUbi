@@ -1,15 +1,20 @@
-"""SQLite setup and migration helpers for monitorUbi."""
+"""SQLite migrations and typed snapshot persistence for monitorUbi."""
 
+import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator
-from datetime import datetime
+from typing import AsyncIterator, Sequence
 
 import aiosqlite
-from schemas import Workspace
+
+from monitorUbi.schemas import DeviceClient, Workspace
+from monitorUbi.service import DeviceSnapshot
+
 
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
-DB_PATH = Path("monitorUbi/monitorUbi.db")
+DEFAULT_DATABASE_PATH = Path(__file__).with_name("monitorUbi.db")
+
 
 async def open_database(database_path: str | Path) -> aiosqlite.Connection:
     """Open a configured SQLite connection and apply pending migrations."""
@@ -57,7 +62,9 @@ async def apply_migrations(connection: aiosqlite.Connection) -> None:
 
 
 @asynccontextmanager
-async def database_connection(database_path: str | Path) -> AsyncIterator[aiosqlite.Connection]:
+async def database_connection(
+    database_path: str | Path,
+) -> AsyncIterator[aiosqlite.Connection]:
     """Yield an initialized database connection and close it afterwards."""
     connection = await open_database(database_path)
     try:
@@ -66,63 +73,78 @@ async def database_connection(database_path: str | Path) -> AsyncIterator[aiosql
         await connection.close()
 
 
-async def upsert_workspaces(workspaces: list[Workspace]):
-    async with database_connection(DB_PATH) as conn:
-        now_iso = datetime.now().isoformat()
-        
-        payloads = [
-            {**ws.model_dump(mode="json"), "last_seen_at": now_iso} 
-            for ws in workspaces
-        ]
-        
-        # 2. Use named placeholders (:key) to match dictionary keys
-        query = """
-            INSERT INTO workspaces (workspace_id, workspace_name, is_owner, status, last_seen_at)
-            VALUES (:workspace_id, :workspace_name, :is_owner, :status, :last_seen_at)
-            ON CONFLICT(workspace_id) DO UPDATE SET
-                workspace_name = excluded.workspace_name,
-                is_owner = excluded.is_owner,
-                status = excluded.status,
-                last_seen_at = excluded.last_seen_at;
-        """
-        
-        # 3. Use executemany to run all upserts efficiently in a single batch
-        await conn.executemany(query, payloads)
-        await conn.commit()
+class SqliteSnapshotStore:
+    """Persist the latest typed API state and append historical samples."""
 
+    def __init__(self, database_path: str | Path = DEFAULT_DATABASE_PATH) -> None:
+        self._database_path = Path(database_path)
 
-async def upsert_device_metrics(connection: aiosqlite.Connection, payload: dict) -> None:
-    """
-    Parses a single device REST payload and performs an atomic relational upsert.
-    Saves state to primary lookup tables and logs structural metric snapshots.
-    """
-    # Use an explicit transaction to ensure all tables succeed or fail together
-    await connection.execute("BEGIN IMMEDIATE")
-    try:
-        now_iso = datetime.utcnow().isoformat()
-        
-        # 1. Upsert Workspace (Required first due to Foreign Key constraints)
-        await connection.execute(
+    async def save_snapshot(
+        self,
+        workspaces: Sequence[Workspace],
+        devices: Sequence[DeviceSnapshot],
+        sampled_at: datetime,
+    ) -> None:
+        """Write one complete poll in a transaction after API collection completes."""
+        if sampled_at.tzinfo is None:
+            raise ValueError("sampled_at must be timezone-aware")
+        sampled_at_text = sampled_at.astimezone(timezone.utc).isoformat()
+
+        async with database_connection(self._database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                await self._upsert_workspaces(connection, workspaces, sampled_at_text)
+                await self._upsert_devices(connection, devices, sampled_at_text)
+                await self._upsert_clients(connection, devices, sampled_at_text)
+                await self._insert_device_samples(connection, devices, sampled_at_text)
+                await self._insert_client_samples(connection, devices, sampled_at_text)
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+
+    async def _upsert_workspaces(
+        self,
+        connection: aiosqlite.Connection,
+        workspaces: Sequence[Workspace],
+        sampled_at: str,
+    ) -> None:
+        if not workspaces:
+            return
+
+        await connection.executemany(
             """
-            INSERT INTO workspaces (workspace_id, workspace_name, is_owner, status, last_seen_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO workspaces (
+                workspace_id, workspace_name, is_owner, status, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(workspace_id) DO UPDATE SET
                 workspace_name = excluded.workspace_name,
                 is_owner = excluded.is_owner,
                 status = excluded.status,
                 last_seen_at = excluded.last_seen_at
             """,
-            (
-                payload["workspace_id"],
-                payload.get("workspace_name", "Unknown"),
-                int(payload.get("is_owner", False)),
-                payload.get("workspace_status", "active"),
-                now_iso
-            )
+            [
+                (
+                    str(workspace.workspace_id),
+                    workspace.workspace_name,
+                    int(workspace.is_owner),
+                    workspace.status,
+                    sampled_at,
+                )
+                for workspace in workspaces
+            ],
         )
 
-        # 2. Upsert Device Entry
-        await connection.execute(
+    async def _upsert_devices(
+        self,
+        connection: aiosqlite.Connection,
+        snapshots: Sequence[DeviceSnapshot],
+        sampled_at: str,
+    ) -> None:
+        if not snapshots:
+            return
+
+        await connection.executemany(
             """
             INSERT INTO devices (
                 id, workspace_id, name, model, state, firmware_version, mac_address,
@@ -130,132 +152,212 @@ async def upsert_device_metrics(connection: aiosqlite.Connection, payload: dict)
                 cellular_data_usage_bytes, cellular_data_limit_bytes, memory_usage_percent,
                 uptime_seconds, client_count, host_address, poe_passthrough, device_mode,
                 wifi_enabled, wifi_ssid, tx_power_level, vpn_profile_name, vpn_status,
-                firewall_rule_names, routing_rule_names, ddns_profile_names, subscription_plan,
-                subscription_status, latitude, longitude, location_last_updated, last_seen_at
+                firewall_rule_names, routing_rule_names, ddns_profile_names,
+                subscription_plan, subscription_status, latitude, longitude,
+                location_last_updated, last_seen_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(id) DO UPDATE SET
+                workspace_id = excluded.workspace_id,
+                name = excluded.name,
+                model = excluded.model,
                 state = excluded.state,
                 firmware_version = excluded.firmware_version,
+                mac_address = excluded.mac_address,
                 wan_source = excluded.wan_source,
                 wan_ip = excluded.wan_ip,
+                enabled_wans = excluded.enabled_wans,
                 isp = excluded.isp,
                 lte_signal_level = excluded.lte_signal_level,
                 cellular_data_usage_bytes = excluded.cellular_data_usage_bytes,
+                cellular_data_limit_bytes = excluded.cellular_data_limit_bytes,
                 memory_usage_percent = excluded.memory_usage_percent,
                 uptime_seconds = excluded.uptime_seconds,
                 client_count = excluded.client_count,
+                host_address = excluded.host_address,
+                poe_passthrough = excluded.poe_passthrough,
+                device_mode = excluded.device_mode,
+                wifi_enabled = excluded.wifi_enabled,
+                wifi_ssid = excluded.wifi_ssid,
+                tx_power_level = excluded.tx_power_level,
+                vpn_profile_name = excluded.vpn_profile_name,
+                vpn_status = excluded.vpn_status,
+                firewall_rule_names = excluded.firewall_rule_names,
+                routing_rule_names = excluded.routing_rule_names,
+                ddns_profile_names = excluded.ddns_profile_names,
+                subscription_plan = excluded.subscription_plan,
+                subscription_status = excluded.subscription_status,
+                latitude = excluded.latitude,
+                longitude = excluded.longitude,
+                location_last_updated = excluded.location_last_updated,
                 last_seen_at = excluded.last_seen_at
             """,
-            (
-                payload["device_id"], payload["workspace_id"], payload["name"], payload["model"],
-                payload["state"], payload["firmware_version"], payload.get("mac_address", ""),
-                payload.get("wan_source"), payload.get("wan_ip"), payload.get("enabled_wans"),
-                payload.get("isp"), payload.get("lte_signal_level"), payload.get("cellular_data_usage_bytes"),
-                payload.get("cellular_data_limit_bytes"), payload.get("memory_usage_percent"),
-                payload.get("uptime_seconds"), len(payload.get("clients", [])), payload.get("host_address"),
-                int(payload.get("poe_passthrough", False)), payload.get("device_mode"),
-                int(payload.get("wifi_enabled", False)), payload.get("wifi_ssid"), payload.get("tx_power_level"),
-                payload.get("vpn_profile_name"), payload.get("vpn_status"), payload.get("firewall_rule_names"),
-                payload.get("routing_rule_names"), payload.get("ddns_profile_names"), payload.get("subscription_plan"),
-                payload.get("subscription_status"), payload.get("latitude"), payload.get("longitude"),
-                payload.get("location_last_updated"), now_iso
-            )
+            [self._device_row(snapshot, sampled_at) for snapshot in snapshots],
         )
 
-        # 3. Append historical telemetry snapshot to device_samples
-        await connection.execute(
+    async def _upsert_clients(
+        self,
+        connection: aiosqlite.Connection,
+        snapshots: Sequence[DeviceSnapshot],
+        sampled_at: str,
+    ) -> None:
+        rows = [
+            self._client_row(snapshot.device.id, client, sampled_at)
+            for snapshot in snapshots
+            for client in snapshot.clients
+        ]
+        if not rows:
+            return
+
+        await connection.executemany(
+            """
+            INSERT INTO clients (
+                device_id, mac, name, type, connection_status, ip_address,
+                is_blocked, wifi_experience, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id, mac) DO UPDATE SET
+                name = excluded.name,
+                type = excluded.type,
+                connection_status = excluded.connection_status,
+                ip_address = excluded.ip_address,
+                is_blocked = excluded.is_blocked,
+                wifi_experience = excluded.wifi_experience,
+                last_seen_at = excluded.last_seen_at
+            """,
+            rows,
+        )
+
+    async def _insert_device_samples(
+        self,
+        connection: aiosqlite.Connection,
+        snapshots: Sequence[DeviceSnapshot],
+        sampled_at: str,
+    ) -> None:
+        if not snapshots:
+            return
+
+        await connection.executemany(
             """
             INSERT INTO device_samples (
-                sampled_at, workspace_id, device_id, state, wan_source, 
-                wan_ip, lte_signal_level, cellular_data_usage_bytes, 
-                memory_usage_percent, uptime_seconds, client_count
+                sampled_at, workspace_id, device_id, state, wan_source, wan_ip,
+                lte_signal_level, cellular_data_usage_bytes, memory_usage_percent,
+                uptime_seconds, client_count
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
+            [
+                (
+                    sampled_at,
+                    str(snapshot.workspace_id),
+                    str(snapshot.device.id),
+                    snapshot.device.state,
+                    snapshot.device.wan_source,
+                    _string_or_none(snapshot.device.wan_ip),
+                    snapshot.device.lte_signal_level,
+                    snapshot.device.cellular_data_usage_bytes,
+                    snapshot.device.memory_usage_percent,
+                    snapshot.device.uptime_seconds,
+                    snapshot.device.client_count,
+                )
+                for snapshot in snapshots
+            ],
+        )
+
+    async def _insert_client_samples(
+        self,
+        connection: aiosqlite.Connection,
+        snapshots: Sequence[DeviceSnapshot],
+        sampled_at: str,
+    ) -> None:
+        rows = [
             (
-                now_iso, payload["workspace_id"], payload["device_id"], payload["state"],
-                payload.get("wan_source"), payload.get("wan_ip"), payload.get("lte_signal_level"),
-                payload.get("cellular_data_usage_bytes"), payload.get("memory_usage_percent"),
-                payload.get("uptime_seconds"), len(payload.get("clients", []))
+                sampled_at,
+                str(snapshot.device.id),
+                client.mac,
+                client.connection_status,
+                _string_or_none(client.ip_address),
+                int(client.is_blocked),
+                client.wifi_experience,
             )
-        )
+            for snapshot in snapshots
+            for client in snapshot.clients
+        ]
+        if not rows:
+            return
 
-        # 4. Process connected clients via executemany block processing
-        clients = payload.get("clients", [])
-        if clients:
-            client_upserts = []
-            client_samples = []
-            
-            for c in clients:
-                mac = c["mac"]
-                client_upserts.append((payload["device_id"], mac, c.get("name", ""), c["type"], c["connection_status"], c.get("ip_address"), int(c.get("is_blocked", False)), c.get("wifi_experience"), now_iso))
-                client_samples.append((now_iso, payload["device_id"], mac, c["connection_status"], c.get("ip_address"), int(c.get("is_blocked", False)), c.get("wifi_experience")))
-
-            # Synchronize static client lookup states
-            await connection.executemany(
-                """
-                INSERT INTO clients (device_id, mac, name, type, connection_status, ip_address, is_blocked, wifi_experience, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(device_id, mac) DO UPDATE SET
-                    connection_status = excluded.connection_status,
-                    ip_address = excluded.ip_address,
-                    is_blocked = excluded.is_blocked,
-                    wifi_experience = excluded.wifi_experience,
-                    last_seen_at = excluded.last_seen_at
-                """,
-                client_upserts
-            )
-
-            # Append historical client samples
-            await connection.executemany(
-                """
-                INSERT INTO client_samples (sampled_at, device_id, mac, connection_status, ip_address, is_blocked, wifi_experience)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                client_samples
-            )
-
-        # 5. Commit transaction safely
-        await connection.commit()
-        
-    except Exception as e:
-        await connection.rollback()
-        # Log response failure history metadata safely
-        await log_api_error(connection, payload.get("endpoint", "unknown"), str(e))
-        raise e
-
-
-async def log_api_error(connection: aiosqlite.Connection, endpoint: str, error_message: str) -> None:
-    """Helper to log runtime failures directly into the tracking database tables."""
-    try:
-        await connection.execute(
+        await connection.executemany(
             """
-            INSERT INTO api_response_log (fetched_at, endpoint, err, payload_json)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO client_samples (
+                sampled_at, device_id, mac, connection_status, ip_address,
+                is_blocked, wifi_experience
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (datetime.utcnow().isoformat(), endpoint, error_message, "{}")
+            rows,
         )
-        await connection.commit()
-    except Exception:
-        pass  # Prevent cascading errors if database write locks hard
+
+    @staticmethod
+    def _device_row(snapshot: DeviceSnapshot, sampled_at: str) -> tuple:
+        device = snapshot.device
+        location = device.location
+        return (
+            str(device.id),
+            str(snapshot.workspace_id),
+            device.name,
+            device.model,
+            device.state,
+            device.firmware_version,
+            device.mac_address,
+            device.wan_source,
+            _string_or_none(device.wan_ip),
+            _json_array(device.enabled_wans),
+            device.isp,
+            device.lte_signal_level,
+            device.cellular_data_usage_bytes,
+            device.cellular_data_limit_bytes,
+            device.memory_usage_percent,
+            device.uptime_seconds,
+            device.client_count,
+            str(device.host_address),
+            int(device.poe_passthrough),
+            device.device_mode,
+            int(device.wifi_enabled),
+            device.wifi_ssid,
+            device.tx_power_level,
+            device.vpn_profile_name,
+            device.vpn_status,
+            _json_array(device.firewall_rule_names),
+            _json_array(device.routing_rule_names),
+            _json_array(device.ddns_profile_names),
+            device.subscription_plan,
+            device.subscription_status,
+            location.latitude if location else None,
+            location.longitude if location else None,
+            location.last_updated if location else None,
+            sampled_at,
+        )
+
+    @staticmethod
+    def _client_row(
+        device_id: object, client: DeviceClient, sampled_at: str
+    ) -> tuple:
+        return (
+            str(device_id),
+            client.mac,
+            client.name,
+            client.type,
+            client.connection_status,
+            _string_or_none(client.ip_address),
+            int(client.is_blocked),
+            client.wifi_experience,
+            sampled_at,
+        )
 
 
-async def get_active_devices(connection: aiosqlite.Connection) -> list[aiosqlite.Row]:
-    """Fetches clean records for UI state synchronization inside tui.py."""
-    async with connection.execute("SELECT id, name, model, state, client_count, last_seen_at FROM devices ORDER BY name ASC") as cursor:
-        return await cursor.fetchall()
+def _json_array(values: Sequence[str]) -> str:
+    """Serialize list-valued API fields for SQLite storage."""
+    return json.dumps(values, separators=(",", ":"))
 
 
-if __name__ == "__main__":
-    import asyncio
-    
-    async def main():
-        async with database_connection("test.db") as conn:
-            async with conn.execute(
-                "SELECT * FROM schema_migrations LIMIT 1"
-            ) as cursor:
-                row = await cursor.fetchone()
-                print(dict(row) if row else None)
-
-    asyncio.run(main())
+def _string_or_none(value: object | None) -> str | None:
+    return str(value) if value is not None else None
