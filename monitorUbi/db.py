@@ -2,9 +2,10 @@
 
 import json
 from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator, Sequence
+from typing import Sequence
 
 import aiosqlite
 
@@ -64,7 +65,7 @@ async def apply_migrations(connection: aiosqlite.Connection) -> None:
 @asynccontextmanager
 async def database_connection(
     database_path: str | Path,
-) -> AsyncIterator[aiosqlite.Connection]:
+) ->  AsyncGenerator[aiosqlite.Connection, None]:
     """Yield an initialized database connection and close it afterwards."""
     connection = await open_database(database_path)
     try:
@@ -83,21 +84,21 @@ class SqliteSnapshotStore:
         self,
         workspaces: Sequence[Workspace],
         devices: Sequence[DeviceSnapshot],
-        sampled_at: datetime,
+        workspaces_observed_at: datetime,
     ) -> None:
         """Write one complete poll in a transaction after API collection completes."""
-        if sampled_at.tzinfo is None:
-            raise ValueError("sampled_at must be timezone-aware")
-        sampled_at_text = sampled_at.astimezone(timezone.utc).isoformat()
+        workspaces_observed_at_text = _timestamp_text(workspaces_observed_at)
 
         async with database_connection(self._database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             try:
-                await self._upsert_workspaces(connection, workspaces, sampled_at_text)
-                await self._upsert_devices(connection, devices, sampled_at_text)
-                await self._upsert_clients(connection, devices, sampled_at_text)
-                await self._insert_device_samples(connection, devices, sampled_at_text)
-                await self._insert_client_samples(connection, devices, sampled_at_text)
+                await self._upsert_workspaces(
+                    connection, workspaces, workspaces_observed_at_text
+                )
+                await self._upsert_devices(connection, devices)
+                await self._upsert_clients(connection, devices)
+                await self._insert_device_samples(connection, devices)
+                await self._insert_client_samples(connection, devices)
                 await connection.commit()
             except Exception:
                 await connection.rollback()
@@ -107,7 +108,7 @@ class SqliteSnapshotStore:
         self,
         connection: aiosqlite.Connection,
         workspaces: Sequence[Workspace],
-        sampled_at: str,
+        observed_at: str,
     ) -> None:
         if not workspaces:
             return
@@ -129,7 +130,7 @@ class SqliteSnapshotStore:
                     workspace.workspace_name,
                     int(workspace.is_owner),
                     workspace.status,
-                    sampled_at,
+                    observed_at,
                 )
                 for workspace in workspaces
             ],
@@ -139,7 +140,6 @@ class SqliteSnapshotStore:
         self,
         connection: aiosqlite.Connection,
         snapshots: Sequence[DeviceSnapshot],
-        sampled_at: str,
     ) -> None:
         if not snapshots:
             return
@@ -194,17 +194,16 @@ class SqliteSnapshotStore:
                 location_last_updated = excluded.location_last_updated,
                 last_seen_at = excluded.last_seen_at
             """,
-            [self._device_row(snapshot, sampled_at) for snapshot in snapshots],
+            [self._device_row(snapshot) for snapshot in snapshots],
         )
 
     async def _upsert_clients(
         self,
         connection: aiosqlite.Connection,
         snapshots: Sequence[DeviceSnapshot],
-        sampled_at: str,
     ) -> None:
         rows = [
-            self._client_row(snapshot.device.id, client, sampled_at)
+            self._client_row(snapshot, client)
             for snapshot in snapshots
             for client in snapshot.clients
         ]
@@ -233,7 +232,6 @@ class SqliteSnapshotStore:
         self,
         connection: aiosqlite.Connection,
         snapshots: Sequence[DeviceSnapshot],
-        sampled_at: str,
     ) -> None:
         if not snapshots:
             return
@@ -248,7 +246,7 @@ class SqliteSnapshotStore:
             """,
             [
                 (
-                    sampled_at,
+                    _timestamp_text(snapshot.device_observed_at),
                     str(snapshot.workspace_id),
                     str(snapshot.device.id),
                     snapshot.device.state,
@@ -268,11 +266,10 @@ class SqliteSnapshotStore:
         self,
         connection: aiosqlite.Connection,
         snapshots: Sequence[DeviceSnapshot],
-        sampled_at: str,
     ) -> None:
         rows = [
             (
-                sampled_at,
+                _timestamp_text(snapshot.clients_observed_at),
                 str(snapshot.device.id),
                 client.mac,
                 client.connection_status,
@@ -297,7 +294,7 @@ class SqliteSnapshotStore:
         )
 
     @staticmethod
-    def _device_row(snapshot: DeviceSnapshot, sampled_at: str) -> tuple:
+    def _device_row(snapshot: DeviceSnapshot) -> tuple:
         device = snapshot.device
         location = device.location
         return (
@@ -334,15 +331,13 @@ class SqliteSnapshotStore:
             location.latitude if location else None,
             location.longitude if location else None,
             location.last_updated if location else None,
-            sampled_at,
+            _timestamp_text(snapshot.device_observed_at),
         )
 
     @staticmethod
-    def _client_row(
-        device_id: object, client: DeviceClient, sampled_at: str
-    ) -> tuple:
+    def _client_row(snapshot: DeviceSnapshot, client: DeviceClient) -> tuple:
         return (
-            str(device_id),
+            str(snapshot.device.id),
             client.mac,
             client.name,
             client.type,
@@ -350,7 +345,7 @@ class SqliteSnapshotStore:
             _string_or_none(client.ip_address),
             int(client.is_blocked),
             client.wifi_experience,
-            sampled_at,
+            _timestamp_text(snapshot.clients_observed_at),
         )
 
 
@@ -361,3 +356,27 @@ def _json_array(values: Sequence[str]) -> str:
 
 def _string_or_none(value: object | None) -> str | None:
     return str(value) if value is not None else None
+
+
+def _timestamp_text(value: datetime) -> str:
+    """Normalize an observation timestamp for SQLite storage."""
+    if value.tzinfo is None:
+        raise ValueError("observation timestamps must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat()
+
+
+if __name__ == "__main__":
+    import asyncio
+    from monitorUbi.client import MobilityApiClient
+    from monitorUbi.logging_setup import configure_logging
+    from monitorUbi.service import MonitorService
+
+    async def main() -> None:
+        configure_logging("headless")
+        test_db_path = Path(__file__).with_name("test.db")
+        async with MobilityApiClient() as api:
+            service = MonitorService(api, SqliteSnapshotStore(test_db_path))
+            summary = await service.sync_once()
+        print(f"Sync summary: {summary}")
+
+    asyncio.run(main())

@@ -41,6 +41,8 @@ class DeviceSnapshot:
     workspace_id: UUID
     device: Device
     clients: tuple[DeviceClient, ...]
+    device_observed_at: datetime
+    clients_observed_at: datetime
 
 
 class SnapshotStore(Protocol):
@@ -50,7 +52,7 @@ class SnapshotStore(Protocol):
         self,
         workspaces: Sequence[Workspace],
         devices: Sequence[DeviceSnapshot],
-        sampled_at: datetime,
+        workspaces_observed_at: datetime,
     ) -> None: ...
 
 
@@ -145,6 +147,7 @@ class MonitorService:
         """Fetch one complete typed snapshot and hand it to the persistence layer."""
         sampled_at = datetime.now(timezone.utc)
         workspaces = await self._call_api(self._api.list_workspaces)
+        workspaces_observed_at = datetime.now(timezone.utc)
         workspace_snapshots = await asyncio.gather(
             *(self._collect_workspace_snapshots(workspace) for workspace in workspaces)
         )
@@ -154,7 +157,7 @@ class MonitorService:
             for device_snapshot in snapshots
         ]
 
-        await self._store.save_snapshot(workspaces, devices, sampled_at)
+        await self._store.save_snapshot(workspaces, devices, workspaces_observed_at)
         return SyncSummary(
             workspace_count=len(workspaces),
             device_count=len(devices),
@@ -180,22 +183,34 @@ class MonitorService:
     async def _collect_device_snapshot(
         self, workspace_id: UUID, summary: DeviceSummary
     ) -> DeviceSnapshot:
-        device, clients = await asyncio.gather(
-            self._call_api(lambda: self._api.get_device(workspace_id, summary.id)),
-            self._call_api(
-                lambda: self._api.list_device_clients(workspace_id, summary.id)
-            ),
+        (device, device_observed_at), (clients, clients_observed_at) = (
+            await asyncio.gather(
+                self._observe_api(
+                    lambda: self._api.get_device(workspace_id, summary.id)
+                ),
+                self._observe_api(
+                    lambda: self._api.list_device_clients(workspace_id, summary.id)
+                ),
+            )
         )
         return DeviceSnapshot(
             workspace_id=workspace_id,
             device=device,
             clients=tuple(clients),
+            device_observed_at=device_observed_at,
+            clients_observed_at=clients_observed_at,
         )
 
     async def _call_api(self, operation: Callable[[], Awaitable[T]]) -> T:
         await self._request_pacer.wait_for_turn()
         async with self._request_semaphore:
             return await operation()
+
+    async def _observe_api(
+        self, operation: Callable[[], Awaitable[T]]
+    ) -> tuple[T, datetime]:
+        value = await self._call_api(operation)
+        return value, datetime.now(timezone.utc)
 
     async def _run_loop(self) -> None:
         while True:
@@ -235,11 +250,11 @@ if __name__ == "__main__":
             self,
             workspaces: Sequence[Workspace],
             devices: Sequence[DeviceSnapshot],
-            sampled_at: datetime,
+            workspaces_observed_at: datetime,
         ) -> None:
             client_count = sum(len(device.clients) for device in devices)
             print(
-                f"Snapshot at {sampled_at.isoformat()}: "
+                f"Snapshot at {workspaces_observed_at.isoformat()}: "
                 f"{len(workspaces)} workspaces, {len(devices)} devices, "
                 f"{client_count} clients"
             )
