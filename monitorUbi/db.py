@@ -5,9 +5,11 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Sequence
 
 import aiosqlite
+from loguru import logger
 
 from monitorUbi.schemas import DeviceClient, Workspace
 from monitorUbi.service import DeviceSnapshot
@@ -59,7 +61,12 @@ async def apply_migrations(connection: aiosqlite.Connection) -> None:
             )
         except Exception:
             await connection.rollback()
+            logger.opt(exception=True).error(
+                "Database migration {version} failed",
+                version=version,
+            )
             raise
+        logger.info("Applied database migration {version}", version=version)
 
 
 @asynccontextmanager
@@ -88,6 +95,15 @@ class SqliteSnapshotStore:
     ) -> None:
         """Write one complete poll in a transaction after API collection completes."""
         workspaces_observed_at_text = _timestamp_text(workspaces_observed_at)
+        client_count = sum(len(snapshot.clients) for snapshot in devices)
+        started_at = perf_counter()
+        logger.debug(
+            "Persisting snapshot: {workspaces} workspaces, {devices} devices, "
+            "{clients} clients",
+            workspaces=len(workspaces),
+            devices=len(devices),
+            clients=client_count,
+        )
 
         async with database_connection(self._database_path) as connection:
             await connection.execute("BEGIN IMMEDIATE")
@@ -100,8 +116,13 @@ class SqliteSnapshotStore:
                 await self._insert_device_samples(connection, devices)
                 await self._insert_client_samples(connection, devices)
                 await connection.commit()
+                logger.debug(
+                    "Snapshot persisted in {elapsed_seconds:.3f}s",
+                    elapsed_seconds=perf_counter() - started_at,
+                )
             except Exception:
                 await connection.rollback()
+                logger.opt(exception=True).debug("Snapshot transaction rolled back")
                 raise
 
     async def _upsert_workspaces(
