@@ -3,7 +3,7 @@
 import json
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Sequence
@@ -92,10 +92,16 @@ class SqliteSnapshotStore:
         workspaces: Sequence[Workspace],
         devices: Sequence[DeviceSnapshot],
         workspaces_observed_at: datetime,
+        online_clients_only: bool = True,
     ) -> None:
         """Write one complete poll in a transaction after API collection completes."""
         workspaces_observed_at_text = _timestamp_text(workspaces_observed_at)
-        client_count = sum(len(snapshot.clients) for snapshot in devices)
+        client_count = sum(
+            1
+            for snapshot in devices
+            for client in snapshot.clients
+            if _should_store_client(client, online_clients_only)
+        )
         started_at = perf_counter()
         logger.debug(
             "Persisting snapshot: {workspaces} workspaces, {devices} devices, "
@@ -112,9 +118,11 @@ class SqliteSnapshotStore:
                     connection, workspaces, workspaces_observed_at_text
                 )
                 await self._upsert_devices(connection, devices)
-                await self._upsert_clients(connection, devices)
+                await self._upsert_clients(connection, devices, online_clients_only)
                 await self._insert_device_samples(connection, devices)
-                await self._insert_client_samples(connection, devices)
+                await self._insert_client_samples(
+                    connection, devices, online_clients_only
+                )
                 await connection.commit()
                 logger.debug(
                     "Snapshot persisted in {elapsed_seconds:.3f}s",
@@ -124,6 +132,37 @@ class SqliteSnapshotStore:
                 await connection.rollback()
                 logger.opt(exception=True).debug("Snapshot transaction rolled back")
                 raise
+
+    async def prune_device_samples(self, retention_days: int) -> int:
+        """Delete device samples older than the requested retention period."""
+        return await self._prune_samples("device_samples", retention_days)
+
+    async def prune_client_samples(self, retention_days: int) -> int:
+        """Delete client samples older than the requested retention period."""
+        return await self._prune_samples("client_samples", retention_days)
+
+    async def _prune_samples(self, table_name: str, retention_days: int) -> int:
+        if retention_days < 0:
+            raise ValueError("retention_days cannot be negative")
+        if table_name not in {"device_samples", "client_samples"}:
+            raise ValueError(f"Unsupported sample table: {table_name}")
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        async with database_connection(self._database_path) as connection:
+            cursor = await connection.execute(
+                f"DELETE FROM {table_name} WHERE sampled_at < ?",
+                (_timestamp_text(cutoff),),
+            )
+            await connection.commit()
+
+        deleted_rows = cursor.rowcount
+        logger.debug(
+            "Pruned {deleted_rows} rows from {table_name} older than {retention_days} days",
+            deleted_rows=deleted_rows,
+            table_name=table_name,
+            retention_days=retention_days,
+        )
+        return deleted_rows
 
     async def _upsert_workspaces(
         self,
@@ -222,11 +261,13 @@ class SqliteSnapshotStore:
         self,
         connection: aiosqlite.Connection,
         snapshots: Sequence[DeviceSnapshot],
+        online_clients_only: bool,
     ) -> None:
         rows = [
             self._client_row(snapshot, client)
             for snapshot in snapshots
             for client in snapshot.clients
+            if _should_store_client(client, online_clients_only)
         ]
         if not rows:
             return
@@ -287,6 +328,7 @@ class SqliteSnapshotStore:
         self,
         connection: aiosqlite.Connection,
         snapshots: Sequence[DeviceSnapshot],
+        online_clients_only: bool,
     ) -> None:
         rows = [
             (
@@ -300,6 +342,7 @@ class SqliteSnapshotStore:
             )
             for snapshot in snapshots
             for client in snapshot.clients
+            if _should_store_client(client, online_clients_only)
         ]
         if not rows:
             return
@@ -377,6 +420,10 @@ def _json_array(values: Sequence[str]) -> str:
 
 def _string_or_none(value: object | None) -> str | None:
     return str(value) if value is not None else None
+
+
+def _should_store_client(client: DeviceClient, online_clients_only: bool) -> bool:
+    return not online_clients_only or client.connection_status == "ONLINE"
 
 
 def _timestamp_text(value: datetime) -> str:
