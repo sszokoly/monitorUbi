@@ -14,7 +14,7 @@ from monitorUbi.schemas import Device, DeviceClient, DeviceSummary, Workspace
 
 
 DEFAULT_POLL_INTERVAL_SECONDS = 120.0
-DEFAULT_REQUESTS_PER_MINUTE = 90
+DEFAULT_REQUESTS_PER_MINUTE = 120
 DEFAULT_MAX_CONCURRENT_REQUESTS = 4
 
 T = TypeVar("T")
@@ -213,6 +213,9 @@ class MonitorService:
         return value, datetime.now(timezone.utc)
 
     async def _run_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        next_poll_at = loop.time()
+
         while True:
             try:
                 summary = await self.sync_once()
@@ -229,7 +232,19 @@ class MonitorService:
             except Exception:
                 logger.exception("Monitor sync failed")
 
-            await asyncio.sleep(self._poll_interval_seconds)
+            next_poll_at += self._poll_interval_seconds
+            now = loop.time()
+            if now > next_poll_at:
+                skipped_polls = int(
+                    (now - next_poll_at) // self._poll_interval_seconds
+                ) + 1
+                next_poll_at += skipped_polls * self._poll_interval_seconds
+                logger.warning(
+                    "Poll exceeded its interval; skipped {skipped_polls} scheduled starts",
+                    skipped_polls=skipped_polls,
+                )
+
+            await asyncio.sleep(max(0.0, next_poll_at - loop.time()))
 
     async def _notify_refresh(self, summary: SyncSummary) -> None:
         if self._on_refresh is None:
