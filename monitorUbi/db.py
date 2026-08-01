@@ -18,6 +18,22 @@ from monitorUbi.service import DeviceSnapshot
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 DEFAULT_DATABASE_PATH = Path(__file__).with_name("monitorUbi.db")
 
+def database_size(database_path: str | Path = DEFAULT_DATABASE_PATH) -> str:
+    """Return the main SQLite file and WAL sidecars as a display-ready size."""
+    path = Path(database_path)
+    size_bytes = sum(
+        candidate.stat().st_size
+        for candidate in (
+            path,
+            Path(f"{path}-wal"),
+            Path(f"{path}-shm"),
+        )
+        if candidate.exists()
+    )
+
+    if size_bytes >= 1024**3:
+        return f"{size_bytes / 1024**3:5.1f} GB"
+    return f"{size_bytes / 1024**2:5.1f} MB"
 
 async def open_database(database_path: str | Path) -> aiosqlite.Connection:
     """Open a configured SQLite connection and apply pending migrations."""
@@ -86,6 +102,30 @@ class SqliteSnapshotStore:
 
     def __init__(self, database_path: str | Path = DEFAULT_DATABASE_PATH) -> None:
         self._database_path = Path(database_path)
+        self._workspace_count = 0
+        self._device_count = 0
+        self._online_client_count = 0
+
+    @property
+    def workspace_count(self) -> int:
+        """Return the cached count of current workspaces."""
+        return self._workspace_count
+
+    @property
+    def device_count(self) -> int:
+        """Return the cached count of current devices."""
+        return self._device_count
+
+    @property
+    def online_client_count(self) -> int:
+        """Return the cached count of current online clients."""
+        return self._online_client_count
+
+    async def refresh_current_counts(self) -> None:
+        """Load current workspace, device, and online-client counts from SQLite."""
+        async with database_connection(self._database_path) as connection:
+            counts = await self._query_current_counts(connection)
+        self._set_current_counts(*counts)
 
     async def save_snapshot(
         self,
@@ -123,7 +163,9 @@ class SqliteSnapshotStore:
                 await self._insert_client_samples(
                     connection, devices, online_clients_only
                 )
+                counts = await self._query_current_counts(connection)
                 await connection.commit()
+                self._set_current_counts(*counts)
                 logger.debug(
                     "Snapshot persisted in {elapsed_seconds:.3f}s",
                     elapsed_seconds=perf_counter() - started_at,
@@ -140,6 +182,54 @@ class SqliteSnapshotStore:
     async def prune_client_samples(self, retention_days: int) -> int:
         """Delete client samples older than the requested retention period."""
         return await self._prune_samples("client_samples", retention_days)
+
+    async def get_device_dashboard_rows(self) -> list[dict[str, object]]:
+        """Return the joined device values required by the dashboard view model."""
+        async with database_connection(self._database_path) as connection:
+            async with connection.execute(
+                """
+                SELECT
+                    devices.name,
+                    workspaces.workspace_name,
+                    devices.state,
+                    devices.wan_ip,
+                    devices.wan_source,
+                    devices.lte_signal_level,
+                    devices.cellular_data_usage_bytes,
+                    devices.client_count,
+                    devices.last_seen_at
+                FROM devices
+                JOIN workspaces
+                    ON workspaces.workspace_id = devices.workspace_id
+                ORDER BY devices.name COLLATE NOCASE
+                """
+            ) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+    async def _query_current_counts(
+        self, connection: aiosqlite.Connection
+    ) -> tuple[int, int, int]:
+        async with connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM workspaces),
+                (SELECT COUNT(*) FROM devices),
+                (
+                    SELECT COUNT(*)
+                    FROM clients
+                    WHERE connection_status = 'ONLINE'
+                )
+            """
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row[0]), int(row[1]), int(row[2])
+
+    def _set_current_counts(
+        self, workspace_count: int, device_count: int, online_client_count: int
+    ) -> None:
+        self._workspace_count = workspace_count
+        self._device_count = device_count
+        self._online_client_count = online_client_count
 
     async def _prune_samples(self, table_name: str, retention_days: int) -> int:
         if retention_days < 0:

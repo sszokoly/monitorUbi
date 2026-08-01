@@ -13,13 +13,13 @@ from monitorUbi.service import MonitorService
 async def run_daemon(service: MonitorService, stop_event: asyncio.Event) -> None:
     """Run an already-configured service until the caller requests shutdown."""
     service.start()
-    logger.info("Headless daemon is running")
+    logger.info("Monitor runner is active")
 
     try:
         await stop_event.wait()
     finally:
         await service.stop()
-        logger.info("Headless daemon stopped")
+        logger.info("Monitor runner stopped")
 
 
 async def main() -> None:

@@ -13,8 +13,8 @@ from loguru import logger
 from monitorUbi.schemas import Device, DeviceClient, DeviceSummary, Workspace
 
 
-DEFAULT_POLL_INTERVAL_SECONDS = 120.0
-DEFAULT_REQUESTS_PER_MINUTE = 120
+DEFAULT_POLL_INTERVAL_SECONDS = 60.0
+DEFAULT_REQUESTS_PER_MINUTE = 60
 DEFAULT_MAX_CONCURRENT_REQUESTS = 4
 
 T = TypeVar("T")

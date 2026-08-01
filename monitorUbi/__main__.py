@@ -1,4 +1,5 @@
 import os
+from monitorUbi.logging_setup import configure_logging
 from monitorUbi.terminal import application_context, terminal_context
 
 os.environ["NCURSES_NO_UTF8_ACS"] = "1"
@@ -6,6 +7,7 @@ os.environ["COLORTERM"] = "truecolor"
 os.environ["ESCDELAY"] = "25"
 
 def main():
+    configure_logging("tui")
     with application_context():
         with terminal_context("xterm-256color"):
             from monitorUbi.tui import UbiApp
