@@ -184,7 +184,7 @@ class UbiApp(App):
                 "green1" if self.service_running else "yellow",
             ),
             (" | RAM Usage: ", "grey70"),
-            (f"{memory_usage()} MB", "turquoise2"),
+            (f"{memory_usage()}", "turquoise2"),
             (" | DB Size: ", "grey70"),
             (f"{database_size()}", "turquoise2"),
             (" | Workspaces: ", "grey70"),
