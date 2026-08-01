@@ -265,7 +265,9 @@ class MonitorService:
         traps: list[DeviceTrap] = []
         for snapshot in devices:
             current_state = snapshot.device.state
-            current_client_count = snapshot.device.client_count
+            current_client_count = sum(
+                client.connection_status == "ONLINE" for client in snapshot.clients
+            )
             previous = self._device_transition_state.get(snapshot.device.id)
             self._device_transition_state[snapshot.device.id] = (
                 current_state,
@@ -281,8 +283,6 @@ class MonitorService:
                     self._device_trap(
                         TrapEvent.DEVICE_DISCONNECTED,
                         snapshot,
-                        previous_state,
-                        current_state,
                         observed_at,
                     )
                 )
@@ -291,8 +291,6 @@ class MonitorService:
                     self._device_trap(
                         TrapEvent.DEVICE_CONNECTED,
                         snapshot,
-                        previous_state,
-                        current_state,
                         observed_at,
                     )
                 )
@@ -301,8 +299,6 @@ class MonitorService:
                     self._device_trap(
                         TrapEvent.CLIENTS_OFFLINE,
                         snapshot,
-                        str(previous_client_count),
-                        str(current_client_count),
                         observed_at,
                     )
                 )
@@ -311,8 +307,6 @@ class MonitorService:
                     self._device_trap(
                         TrapEvent.CLIENTS_ONLINE,
                         snapshot,
-                        str(previous_client_count),
-                        str(current_client_count),
                         observed_at,
                     )
                 )
@@ -325,17 +319,11 @@ class MonitorService:
     def _device_trap(
         event: TrapEvent,
         snapshot: DeviceSnapshot,
-        previous_value: str,
-        current_value: str,
         observed_at: datetime,
     ) -> DeviceTrap:
         return DeviceTrap(
             event=event,
-            workspace_id=snapshot.workspace_id,
-            device_id=snapshot.device.id,
             device_name=snapshot.device.name,
-            previous_value=previous_value,
-            current_value=current_value,
             observed_at=observed_at,
         )
 

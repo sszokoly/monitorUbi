@@ -1,10 +1,8 @@
 """SNMP v2c trap delivery for monitorUbi device transitions."""
 
-import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from uuid import UUID
 
 from loguru import logger
 from pysnmp.hlapi.v3arch.asyncio import (
@@ -20,7 +18,9 @@ from pysnmp.hlapi.v3arch.asyncio import (
 from pysnmp.proto.rfc1902 import OctetString
 
 
-SNMP_TRAP_TARGETS: list[tuple[str, int, str]] = []
+SNMP_TRAP_TARGETS: list[tuple[str, int, str]] = [
+    ("192.168.1.235", 162, "public")
+]
 """SNMP v2c targets as ``(host, port, community)`` tuples."""
 
 ENTERPRISE_OID = "1.3.6.1.4.1.8247884.1"
@@ -42,25 +42,31 @@ _EVENT_OIDS = {
     TrapEvent.CLIENTS_ONLINE: f"{ENTERPRISE_OID}.0.4",
 }
 
-_DEVICE_ID_OID = f"{ENTERPRISE_OID}.1.1"
-_DEVICE_NAME_OID = f"{ENTERPRISE_OID}.1.2"
-_WORKSPACE_ID_OID = f"{ENTERPRISE_OID}.1.3"
-_PREVIOUS_VALUE_OID = f"{ENTERPRISE_OID}.1.4"
-_CURRENT_VALUE_OID = f"{ENTERPRISE_OID}.1.5"
-_OBSERVED_AT_OID = f"{ENTERPRISE_OID}.1.6"
+_MESSAGE_OID = f"{ENTERPRISE_OID}.1.1"
 
 
 @dataclass(frozen=True)
 class DeviceTrap:
-    """Details included with one device transition notification."""
+    """A concise device-transition notification."""
 
     event: TrapEvent
-    workspace_id: UUID
-    device_id: UUID
     device_name: str
-    previous_value: str
-    current_value: str
     observed_at: datetime
+
+    @property
+    def message(self) -> str:
+        """Return the human-readable message delivered in the trap varbind."""
+        timestamp = self.observed_at.astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
+        match self.event:
+            case TrapEvent.DEVICE_DISCONNECTED:
+                event_text = "DISCONNECTED"
+            case TrapEvent.DEVICE_CONNECTED:
+                event_text = "CONNECTED"
+            case TrapEvent.CLIENTS_OFFLINE:
+                event_text = "clients OFFLINE"
+            case TrapEvent.CLIENTS_ONLINE:
+                event_text = "clients ONLINE"
+        return f"Device {self.device_name} {event_text} at {timestamp}"
 
 
 class SnmpTrapSender:
@@ -91,30 +97,7 @@ class SnmpTrapSender:
                 ContextData(),
                 "trap",
                 NotificationType(ObjectIdentity(_EVENT_OIDS[trap.event])).add_varbinds(
-                    ObjectType(
-                        ObjectIdentity(_DEVICE_ID_OID), OctetString(str(trap.device_id))
-                    ),
-                    ObjectType(
-                        ObjectIdentity(_DEVICE_NAME_OID), OctetString(trap.device_name)
-                    ),
-                    ObjectType(
-                        ObjectIdentity(_WORKSPACE_ID_OID),
-                        OctetString(str(trap.workspace_id)),
-                    ),
-                    ObjectType(
-                        ObjectIdentity(_PREVIOUS_VALUE_OID),
-                        OctetString(trap.previous_value),
-                    ),
-                    ObjectType(
-                        ObjectIdentity(_CURRENT_VALUE_OID),
-                        OctetString(trap.current_value),
-                    ),
-                    ObjectType(
-                        ObjectIdentity(_OBSERVED_AT_OID),
-                        OctetString(
-                            trap.observed_at.astimezone(timezone.utc).isoformat()
-                        ),
-                    ),
+                    ObjectType(ObjectIdentity(_MESSAGE_OID), OctetString(trap.message))
                 ),
             )
             if error_indication:
@@ -125,17 +108,32 @@ class SnmpTrapSender:
                 )
         except Exception:
             logger.opt(exception=True).warning(
-                "Failed to send SNMP trap {event} for device {device_id} to {host}:{port}",
+                "Failed to send SNMP trap {event} for device {device_name} to {host}:{port}",
                 event=trap.event.value,
-                device_id=trap.device_id,
+                device_name=trap.device_name,
                 host=host,
                 port=port,
             )
         else:
             logger.info(
-                "Sent SNMP trap {event} for device {device_id} to {host}:{port}",
+                "Sent SNMP trap {event} for device {device_name} to {host}:{port}",
                 event=trap.event.value,
-                device_id=trap.device_id,
+                device_name=trap.device_name,
                 host=host,
                 port=port,
             )
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    async def main() -> None:
+        trap = DeviceTrap(
+            event=TrapEvent.DEVICE_CONNECTED,
+            device_name="TestDevice",
+            observed_at=datetime.now(timezone.utc),
+        )
+        sender = SnmpTrapSender()
+        await sender.send(trap)
+
+    asyncio.run(main())
