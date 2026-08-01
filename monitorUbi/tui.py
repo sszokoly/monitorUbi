@@ -302,6 +302,10 @@ class UbiApp(App):
 
     async def _refresh_after_sync(self, _: SyncSummary) -> None:
         try:
+            await self._store.refresh_history_days()
+            self.query_one("#service-status", Static).update(
+                self.service_status_text()
+            )
             await self.refresh_device_table()
         except Exception as error:
             self.notify(f"Dashboard refresh failed: {error}", severity="error")

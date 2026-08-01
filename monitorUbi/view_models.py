@@ -67,7 +67,7 @@ class DeviceDashboardViewModel:
     lte_signal_level: Optional[str]
     cellular_data_usage_bytes: int
     client_count: int
-    last_seen_at: str
+    last_seen_at: str | None
 
     @property
     def state_text(self) -> Text:
@@ -91,6 +91,8 @@ class DeviceDashboardViewModel:
 
     @property
     def last_seen_text(self) -> str:
+        if self.last_seen_at is None:
+            return "-"
         observed_at = datetime.fromisoformat(self.last_seen_at)
         if observed_at.tzinfo is None:
             observed_at = observed_at.replace(tzinfo=timezone.utc)

@@ -296,13 +296,13 @@ class SqliteSnapshotStore:
         await connection.executemany(
             """
             INSERT INTO workspaces (
-                workspace_id, workspace_name, is_owner, status, last_seen_at
+                workspace_id, workspace_name, is_owner, status, last_polled_at
             ) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(workspace_id) DO UPDATE SET
                 workspace_name = excluded.workspace_name,
                 is_owner = excluded.is_owner,
                 status = excluded.status,
-                last_seen_at = excluded.last_seen_at
+                last_polled_at = excluded.last_polled_at
             """,
             [
                 (
@@ -334,10 +334,10 @@ class SqliteSnapshotStore:
                 wifi_enabled, wifi_ssid, tx_power_level, vpn_profile_name, vpn_status,
                 firewall_rule_names, routing_rule_names, ddns_profile_names,
                 subscription_plan, subscription_status, latitude, longitude,
-                location_last_updated, last_seen_at
+                location_last_updated, last_polled_at, last_seen_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(id) DO UPDATE SET
                 workspace_id = excluded.workspace_id,
@@ -372,7 +372,11 @@ class SqliteSnapshotStore:
                 latitude = excluded.latitude,
                 longitude = excluded.longitude,
                 location_last_updated = excluded.location_last_updated,
-                last_seen_at = excluded.last_seen_at
+                last_polled_at = excluded.last_polled_at,
+                last_seen_at = CASE
+                    WHEN excluded.state = 'CONNECTED' THEN excluded.last_seen_at
+                    ELSE devices.last_seen_at
+                END
             """,
             [self._device_row(snapshot) for snapshot in snapshots],
         )
@@ -396,7 +400,7 @@ class SqliteSnapshotStore:
             """
             INSERT INTO clients (
                 device_id, mac, name, type, connection_status, ip_address,
-                is_blocked, wifi_experience, last_seen_at
+                is_blocked, wifi_experience, last_polled_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(device_id, mac) DO UPDATE SET
                 name = excluded.name,
@@ -405,7 +409,7 @@ class SqliteSnapshotStore:
                 ip_address = excluded.ip_address,
                 is_blocked = excluded.is_blocked,
                 wifi_experience = excluded.wifi_experience,
-                last_seen_at = excluded.last_seen_at
+                last_polled_at = excluded.last_polled_at
             """,
             rows,
         )
@@ -516,6 +520,11 @@ class SqliteSnapshotStore:
             location.longitude if location else None,
             location.last_updated if location else None,
             _timestamp_text(snapshot.device_observed_at),
+            (
+                _timestamp_text(snapshot.device_observed_at)
+                if device.state == "CONNECTED"
+                else None
+            ),
         )
 
     @staticmethod

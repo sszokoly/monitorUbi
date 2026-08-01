@@ -3,7 +3,7 @@ CREATE TABLE workspaces (
     workspace_name TEXT NOT NULL,
     is_owner INTEGER NOT NULL,
     status TEXT NOT NULL,
-    last_seen_at TEXT NOT NULL
+    last_polled_at TEXT NOT NULL
 );
 
 CREATE TABLE devices (
@@ -40,7 +40,8 @@ CREATE TABLE devices (
     latitude REAL,
     longitude REAL,
     location_last_updated INTEGER,
-    last_seen_at TEXT NOT NULL,
+    last_polled_at TEXT NOT NULL,
+    last_seen_at TEXT,
 
     FOREIGN KEY (workspace_id)
         REFERENCES workspaces(workspace_id)
@@ -56,7 +57,7 @@ CREATE TABLE clients (
     ip_address TEXT,
     is_blocked INTEGER NOT NULL,
     wifi_experience INTEGER,
-    last_seen_at TEXT NOT NULL,
+    last_polled_at TEXT NOT NULL,
 
     PRIMARY KEY (device_id, mac),
     FOREIGN KEY (device_id)
