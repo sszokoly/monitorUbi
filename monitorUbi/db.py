@@ -33,7 +33,9 @@ def database_size(database_path: str | Path = DEFAULT_DATABASE_PATH) -> str:
 
     if size_bytes >= 1024**3:
         return f"{size_bytes / 1024**3:5.1f} GB"
-    return f"{size_bytes / 1024**2:5.1f} MB"
+    elif size_bytes >= 1024**2:
+        return f"{size_bytes / 1024**2:5.1f} MB"
+    return f"{size_bytes / 1024:5.1f} KB"
 
 async def open_database(database_path: str | Path) -> aiosqlite.Connection:
     """Open a configured SQLite connection and apply pending migrations."""
@@ -105,7 +107,8 @@ class SqliteSnapshotStore:
         self._workspace_count = 0
         self._device_count = 0
         self._online_client_count = 0
-
+        self._history_days = 0
+        
     @property
     def workspace_count(self) -> int:
         """Return the cached count of current workspaces."""
@@ -121,11 +124,36 @@ class SqliteSnapshotStore:
         """Return the cached count of current online clients."""
         return self._online_client_count
 
+    @property
+    def history_days(self) -> int:
+        """Return the cached number of days of historical data."""
+        return self._history_days
+
     async def refresh_current_counts(self) -> None:
         """Load current workspace, device, and online-client counts from SQLite."""
         async with database_connection(self._database_path) as connection:
             counts = await self._query_current_counts(connection)
         self._set_current_counts(*counts)
+
+    async def refresh_history_days(self) -> None:
+        """Load the number of days of historical device samples from SQLite."""
+        self._history_days = await self.get_device_sample_history_days()
+
+    async def get_device_sample_history_days(self) -> int:
+        """Return complete elapsed days since the oldest device sample."""
+        async with database_connection(self._database_path) as connection:
+            async with connection.execute(
+                "SELECT MIN(sampled_at) AS oldest_sampled_at FROM device_samples"
+            ) as cursor:
+                row = await cursor.fetchone()
+
+        oldest_sampled_at = row["oldest_sampled_at"] if row is not None else None
+        if oldest_sampled_at is None:
+            return 0
+
+        oldest_sampled_at_datetime = datetime.fromisoformat(oldest_sampled_at)
+        elapsed = datetime.now(timezone.utc) - oldest_sampled_at_datetime
+        return max(0, elapsed.days)
 
     async def save_snapshot(
         self,
@@ -222,6 +250,8 @@ class SqliteSnapshotStore:
             """
         ) as cursor:
             row = await cursor.fetchone()
+        if row is None:
+            return 0, 0, 0
         return int(row[0]), int(row[1]), int(row[2])
 
     def _set_current_counts(
