@@ -107,7 +107,7 @@ class UbiApp(App):
             (f" ({status_label})", status_style),
             (" | Service: ", "bold"),
             (
-                "enabled" if self.service_running else "disabled",
+                "enabled " if self.service_running else "disabled",
                 "green" if self.service_running else "yellow",
             ),
             (f" | RAM Usage: {memory_usage()} MB"),
