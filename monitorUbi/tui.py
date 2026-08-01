@@ -46,7 +46,7 @@ class FilterScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Container(id="filter-dialog") as dialog:
-            dialog.border_title = "Regex Search"
+            dialog.border_title = "Search"
             yield Input(
                 self._filter_text,
                 id="filter-input",

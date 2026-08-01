@@ -11,6 +11,7 @@ from uuid import UUID
 from loguru import logger
 
 from monitorUbi.schemas import Device, DeviceClient, DeviceSummary, Workspace
+from monitorUbi.snmp import DeviceTrap, SnmpTrapSender, TrapEvent
 
 
 DEFAULT_POLL_INTERVAL_SECONDS = 60.0
@@ -100,6 +101,7 @@ class MonitorService:
         requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE,
         max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS,
         on_refresh: RefreshCallback | None = None,
+        trap_sender: SnmpTrapSender | None = None,
     ) -> None:
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be greater than 0")
@@ -110,6 +112,8 @@ class MonitorService:
         self._store = store
         self._poll_interval_seconds = poll_interval_seconds
         self._on_refresh = on_refresh
+        self._trap_sender = trap_sender or SnmpTrapSender()
+        self._device_transition_state: dict[UUID, tuple[str, int]] = {}
         self._request_pacer = _RequestPacer(requests_per_minute)
         self._request_semaphore = asyncio.Semaphore(max_concurrent_requests)
         self._poll_task: asyncio.Task[None] | None = None
@@ -158,6 +162,7 @@ class MonitorService:
         ]
 
         await self._store.save_snapshot(workspaces, devices, workspaces_observed_at)
+        await self._send_device_transition_traps(devices)
         return SyncSummary(
             workspace_count=len(workspaces),
             device_count=len(devices),
@@ -252,6 +257,87 @@ class MonitorService:
         result = self._on_refresh(summary)
         if inspect.isawaitable(result):
             await result
+
+    async def _send_device_transition_traps(
+        self, devices: Sequence[DeviceSnapshot]
+    ) -> None:
+        """Send traps for state and online-client threshold transitions."""
+        traps: list[DeviceTrap] = []
+        for snapshot in devices:
+            current_state = snapshot.device.state
+            current_client_count = snapshot.device.client_count
+            previous = self._device_transition_state.get(snapshot.device.id)
+            self._device_transition_state[snapshot.device.id] = (
+                current_state,
+                current_client_count,
+            )
+            if previous is None:
+                continue
+
+            previous_state, previous_client_count = previous
+            observed_at = max(snapshot.device_observed_at, snapshot.clients_observed_at)
+            if current_state == "DISCONNECTED" and previous_state != "DISCONNECTED":
+                traps.append(
+                    self._device_trap(
+                        TrapEvent.DEVICE_DISCONNECTED,
+                        snapshot,
+                        previous_state,
+                        current_state,
+                        observed_at,
+                    )
+                )
+            if current_state == "CONNECTED" and previous_state != "CONNECTED":
+                traps.append(
+                    self._device_trap(
+                        TrapEvent.DEVICE_CONNECTED,
+                        snapshot,
+                        previous_state,
+                        current_state,
+                        observed_at,
+                    )
+                )
+            if previous_client_count > 0 and current_client_count == 0:
+                traps.append(
+                    self._device_trap(
+                        TrapEvent.CLIENTS_OFFLINE,
+                        snapshot,
+                        str(previous_client_count),
+                        str(current_client_count),
+                        observed_at,
+                    )
+                )
+            if previous_client_count == 0 and current_client_count > 0:
+                traps.append(
+                    self._device_trap(
+                        TrapEvent.CLIENTS_ONLINE,
+                        snapshot,
+                        str(previous_client_count),
+                        str(current_client_count),
+                        observed_at,
+                    )
+                )
+
+        await asyncio.gather(
+            *(self._trap_sender.send(trap) for trap in traps), return_exceptions=True
+        )
+
+    @staticmethod
+    def _device_trap(
+        event: TrapEvent,
+        snapshot: DeviceSnapshot,
+        previous_value: str,
+        current_value: str,
+        observed_at: datetime,
+    ) -> DeviceTrap:
+        return DeviceTrap(
+            event=event,
+            workspace_id=snapshot.workspace_id,
+            device_id=snapshot.device.id,
+            device_name=snapshot.device.name,
+            previous_value=previous_value,
+            current_value=current_value,
+            observed_at=observed_at,
+        )
 
 
 if __name__ == "__main__":
