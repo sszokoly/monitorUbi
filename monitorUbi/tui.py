@@ -6,8 +6,9 @@ from textual.app import App, ComposeResult
 from textual.css.query import NoMatches
 from textual.containers import Container
 from textual.reactive import reactive
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Input, Static
+from textual_plot import PlotWidget
 from monitorUbi.client import MobilityApiClient
 from monitorUbi.daemon import run_daemon
 from monitorUbi.db import SqliteSnapshotStore, database_size
@@ -77,6 +78,70 @@ class FilterScreen(ModalScreen[str | None]):
             self.action_search()
 
 
+class DeviceDetailsScreen(Screen):
+    """Empty device-detail layout with plot hosts ready for later data rendering."""
+
+    HORIZONTAL_BREAKPOINTS = [(120, "wide")]
+
+    CSS = """
+    DeviceDetailsScreen {
+        layout: vertical;
+    }
+
+    DeviceDetailsScreen.wide {
+        layout: grid;
+        grid-size: 3 2;
+        grid-columns: 1fr 1fr 1fr;
+        grid-rows: 1fr 1fr;
+    }
+
+    .details-panel {
+        height: 1fr;
+        border: round $primary;
+        padding: 0;
+    }
+
+    DeviceDetailsScreen.wide #details-device {
+        row-span: 2;
+    }
+
+    DeviceDetailsScreen.wide #details-signal,
+    DeviceDetailsScreen.wide #details-usage {
+        column-span: 2;
+    }
+
+    #signal-plot,
+    #usage-plot {
+        width: 100%;
+        height: 100%;
+    }
+    """
+
+    BINDINGS = [("escape", "back", "Back")]
+
+    def compose(self) -> ComposeResult:
+        with Container(id="details-device", classes="details-panel") as device_panel:
+            device_panel.border_title = "Device"
+            yield Static()
+
+        with Container(id="details-signal", classes="details-panel") as signal_panel:
+            signal_panel.border_title = "Signal"
+            yield PlotWidget(id="signal-plot")
+
+        with Container(id="details-usage", classes="details-panel") as usage_panel:
+            usage_panel.border_title = "Usage"
+            yield PlotWidget(id="usage-plot")
+
+    def on_mount(self) -> None:
+        for plot in self.query(PlotWidget):
+            plot.margin_top = 0
+            plot.margin_bottom = 2
+            plot.margin_left = 8
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+
 class UbiApp(App):
     """Monitoring dashboard for Ubiquiti UMR devices."""
 
@@ -127,7 +192,6 @@ class UbiApp(App):
         ("s", "toggle_service", "Start/Stop"),
         ("q", "quit", "Quit"),
         ("f", "filter", "Filter"),
-        ("enter", "details", "Details"),
     ]
 
     service_running = reactive(False)
@@ -337,4 +401,10 @@ class UbiApp(App):
         await self.refresh_device_table()
 
     def action_details(self) -> None:
-        self.notify("Static dashboard: device details are not configured.")
+        if self.query_one("#device-table", DataTable).row_count == 0:
+            self.notify("No device is selected.", severity="warning")
+            return
+        self.push_screen(DeviceDetailsScreen())
+
+    def on_data_table_row_selected(self, _: DataTable.RowSelected) -> None:
+        self.action_details()
