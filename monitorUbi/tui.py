@@ -51,7 +51,7 @@ class FilterScreen(ModalScreen[str | None]):
             yield Input(
                 self._filter_text,
                 id="filter-input",
-                placeholder="Enter a regular expression",
+                placeholder="Enter a string or regular expression",
                 compact=True,
             )
 
