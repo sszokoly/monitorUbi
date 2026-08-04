@@ -59,6 +59,7 @@ def _format_data_usage(value: int) -> str:
 class DeviceDashboardViewModel:
     """One joined workspace/device row formatted for the device dashboard."""
 
+    device_id: str
     name: str
     workspace_name: str
     state: str

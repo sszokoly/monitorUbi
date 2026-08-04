@@ -1,0 +1,33 @@
+[client]
+default_timeout_seconds = 5.0
+
+[database]
+# Shared by the checkout TUI and the systemd deployment.
+default_database_path = "/opt/monitorUbi/monitorUbi/monitorUbi.db"
+
+[service]
+default_poll_interval_seconds = 60.0
+default_requests_per_minute = 60
+default_max_concurrent_requests = 4
+
+[snmp]
+trap_targets = [
+  { host = "192.168.1.235", port = 162, community = "public" },
+]
+
+[[logging.handlers]]
+sink = "ext://sys.stderr"
+modes = ["headless"]
+format = "{time:YYYY-MM-DD HH:mm:ss} | <level>{level:<8}</level> | {message}"
+level = "INFO"
+colorize = true
+
+[[logging.handlers]]
+sink = "app.log"
+modes = ["tui", "headless"]
+format = "{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {function:<15} | {line:<3} | {message}"
+level = "INFO"
+rotation = 2048000
+retention = 3
+backtrace = false
+diagnose = false

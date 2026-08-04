@@ -1,20 +1,233 @@
 import asyncio
 import re
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from math import log10
 
+from rich.style import Style
 from rich.text import Text
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.css.query import NoMatches
-from textual.containers import Container
-from textual.reactive import reactive
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, Input, Static
-from textual_plot import PlotWidget
-from monitorUbi.client import MobilityApiClient
-from monitorUbi.daemon import run_daemon
+from textual.widgets import Button, DataTable, Input, Static
+from textual_hires_canvas import Canvas, TextAlign
+from textual_plot import HiResMode, NumericAxisFormatter, PlotWidget
 from monitorUbi.db import SqliteSnapshotStore, database_size
-from monitorUbi.service import MonitorService, SyncSummary
-from monitorUbi.utils import memory_usage
+from monitorUbi.systemd import SystemdError, SystemdService
+from monitorUbi.utils import memory_usage, uptime_seconds_to_string
 from monitorUbi.view_models import DeviceDashboardViewModel
+
+
+_DETAIL_LABEL_STYLE = Style(color="grey70", bold=False)
+_DETAIL_VALUE_STYLE = Style(color="turquoise2", bold=False)
+_SIGNAL_LEVELS = {"NO_SIGNAL": 0, "POOR": 1, "FAIR": 2, "STRONG": 3}
+_SIGNAL_STYLES = {
+    "NO_SIGNAL": "red1",
+    "POOR": "orange1",
+    "FAIR": "yellow",
+    "STRONG": "green1",
+}
+
+
+def _usage_tick_bytes(maximum: int) -> list[int]:
+    """Return fixed byte references through the next value above maximum."""
+    ticks = [0]
+    unit = 1024
+    minimum_maximum = 10 * 1024**2
+    while True:
+        for multiplier in (1, 10, 100):
+            tick = unit * multiplier
+            ticks.append(tick)
+            if tick >= max(maximum, minimum_maximum):
+                return ticks
+        unit *= 1024
+
+
+def _format_usage_tick(value: int) -> str:
+    """Format a fixed Usage-axis reference value."""
+    if value == 0:
+        return "0 KB"
+    if value >= 1024**3:
+        return f"{value / 1024**3:g} GB"
+    if value >= 1024**2:
+        return f"{value / 1024**2:g} MB"
+    return f"{value / 1024:g} KB"
+
+
+class _LocalTimestampFormatter(NumericAxisFormatter):
+    """Format epoch-second ticks using local time."""
+
+    def get_labels_for_ticks(self, ticks: Sequence[float]) -> list[str]:
+        return [
+            datetime.fromtimestamp(tick, timezone.utc).astimezone().strftime("%H:%M")
+            for tick in ticks
+        ]
+
+
+class _SignalLevelFormatter(NumericAxisFormatter):
+    """Format fixed LTE signal levels rather than arbitrary numeric ticks."""
+
+    _labels = {0: "No Signal", 1: "Poor", 2: "Fair", 3: "Strong"}
+
+    def get_ticks(self, min_: float, max_: float, max_ticks: int = 8) -> list[float]:
+        return [float(level) for level in range(4)]
+
+    def get_labels_for_ticks(self, ticks: Sequence[float]) -> list[str]:
+        return [self._labels.get(round(tick), "") for tick in ticks]
+
+
+class _UsageByteFormatter(NumericAxisFormatter):
+    """Format fixed log10(byte_count + 1) positions as byte references."""
+
+    def __init__(self, tick_bytes: list[int]) -> None:
+        self._tick_bytes = tick_bytes
+        self._tick_positions = [log10(value + 1) for value in tick_bytes]
+
+    def get_ticks(self, min_: float, max_: float, max_ticks: int = 8) -> list[float]:
+        return self._tick_positions
+
+    def get_labels_for_ticks(self, ticks: Sequence[float]) -> list[str]:
+        return [
+            _format_usage_tick(
+                self._tick_bytes[
+                    min(
+                        range(len(self._tick_positions)),
+                        key=lambda index: abs(self._tick_positions[index] - tick),
+                    )
+                ]
+            )
+            for tick in ticks
+        ]
+
+
+class _DateBoundedPlot(PlotWidget):
+    """Plot widget with bounded horizontal navigation and date-aware X labels."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._sampled_at_min: float | None = None
+        self._sampled_at_max: float | None = None
+
+    def set_sampled_at_bounds(self, minimum: float, maximum: float) -> None:
+        """Set the available sample-time range used to clamp navigation."""
+        self._sampled_at_min = minimum
+        self._sampled_at_max = maximum
+
+    def _render_plot(self) -> None:
+        """Render the base plot without its top frame edge or top tick marks."""
+        super()._render_plot()
+        try:
+            canvas = self.query_one("#plot", Canvas)
+        except NoMatches:
+            return
+        for x in range(canvas.size.width):
+            canvas.set_pixel(x, 0, " ", style="")
+        for y in range(canvas.size.height):
+            canvas.set_pixel(canvas.size.width - 1, y, " ", style="")
+
+    def action_pan_up(self) -> None:
+        """Disable vertical panning for the fixed chart scale."""
+
+    def action_pan_down(self) -> None:
+        """Disable vertical panning for the fixed chart scale."""
+
+    def _pan(self, factor_x: float, factor_y: float) -> None:
+        """Pan horizontally only, keeping the view inside available samples."""
+        if factor_x == 0 or self._sampled_at_min == self._sampled_at_max:
+            return
+        super()._pan(factor_x, 0)
+        self._clamp_x_limits()
+        self._rerender()
+
+    def _zoom(
+        self,
+        center_x: float,
+        center_y: float,
+        factor: float,
+        zoom_x: bool,
+        zoom_y: bool,
+    ) -> None:
+        """Zoom horizontally only and prevent zooming past sample-time bounds."""
+        if self._sampled_at_min == self._sampled_at_max:
+            return
+        super()._zoom(center_x, center_y, factor, zoom_x, False)
+        self._clamp_x_limits()
+        self._rerender()
+
+    def _clamp_x_limits(self) -> None:
+        """Constrain the visible range to the oldest and newest sampled_at values."""
+        if self._sampled_at_min is None or self._sampled_at_max is None:
+            return
+
+        available_width = self._sampled_at_max - self._sampled_at_min
+        visible_width = self._x_max - self._x_min
+        if visible_width >= available_width:
+            self._x_min = self._sampled_at_min
+            self._x_max = self._sampled_at_max
+        elif self._x_min < self._sampled_at_min:
+            self._x_max += self._sampled_at_min - self._x_min
+            self._x_min = self._sampled_at_min
+        elif self._x_max > self._sampled_at_max:
+            self._x_min -= self._x_max - self._sampled_at_max
+            self._x_max = self._sampled_at_max
+
+    def _render_x_ticks(self) -> None:
+        canvas = self.query_one("#plot", Canvas)
+        bottom_margin = self.query_one("#margin-bottom", Canvas)
+        bottom_margin.reset()
+        if self._x_ticks is None:
+            x_ticks, time_labels = self._x_formatter.get_ticks_and_labels(
+                self._x_min, self._x_max
+            )
+        else:
+            x_ticks = self._x_ticks
+            time_labels = self._x_formatter.get_labels_for_ticks(x_ticks)
+        previous_date = None
+
+        for tick, time_label in zip(x_ticks, time_labels):
+            if tick < self._x_min or tick > self._x_max:
+                continue
+
+            align = TextAlign.CENTER
+            x, _ = self.get_pixel_from_coordinate(tick, 0.0)
+            if tick == self._x_min:
+                x -= 1
+            elif tick == self._x_max:
+                align = TextAlign.RIGHT
+
+            for y, quad in (
+                (0, (2, 0, 0, 0)),
+                (self._scale_rectangle.bottom, (0, 0, 2, 0)),
+            ):
+                pixel = self.combine_quad_with_pixel(quad, canvas, x, y)
+                canvas.set_pixel(
+                    x,
+                    y,
+                    pixel,
+                    style=str(self.get_component_rich_style("plot--axis")),
+                )
+
+            tick_style = self.get_component_rich_style("plot--tick")
+            bottom_margin.write_text(
+                x + self.margin_left,
+                0,
+                f"[{tick_style}]{time_label}",
+                align,
+            )
+            tick_date = datetime.fromtimestamp(tick, timezone.utc).astimezone().date()
+            if tick_date != previous_date:
+                bottom_margin.write_text(
+                    x + self.margin_left,
+                    1,
+                    f"[{tick_style}]{tick_date.isoformat()}",
+                    align,
+                )
+                previous_date = tick_date
+
+    def _render_x_label(self) -> None:
+        """Suppress the base X-axis title; time and date labels are sufficient."""
 
 
 class FilterScreen(ModalScreen[str | None]):
@@ -78,8 +291,118 @@ class FilterScreen(ModalScreen[str | None]):
             self.action_search()
 
 
+class ConfirmationScreen(ModalScreen[bool]):
+    """Ask for a one-line keyboard confirmation before changing service state."""
+
+    CSS = """
+    ConfirmationScreen {
+        align: center middle;
+    }
+
+    #confirmation-dialog {
+        width: 60;
+        max-width: 90%;
+        height: 4;
+        border: round $warning;
+        background: $surface;
+        padding: 0 1;
+        align: center middle;
+    }
+
+    #confirmation-message {
+        width: 100%;
+        height: 1;
+        content-align: center middle;
+        text-align: center;
+    }
+
+    #confirmation-ok {
+        width: 6;
+        min-width: 6;
+        max-width: 6;
+        height: 1;
+    }
+
+    #confirmation-actions {
+        width: 100%;
+        height: 1;
+        align: center middle;
+    }
+    """
+
+    BINDINGS = [("enter", "confirm", "Confirm"), ("escape", "cancel", "Cancel")]
+
+    def __init__(self, prompt: str) -> None:
+        super().__init__()
+        self._prompt = prompt
+
+    def compose(self) -> ComposeResult:
+        with Container(id="confirmation-dialog") as dialog:
+            dialog.border_title = "Confirm"
+            yield Static(self._prompt, id="confirmation-message")
+            with Horizontal(id="confirmation-actions"):
+                yield Button(
+                    "OK", id="confirmation-ok", variant="primary", compact=True
+                )
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "confirmation-ok":
+            self.action_confirm()
+
+
+class SudoPasswordScreen(ModalScreen[str | None]):
+    """Collect a sudo password without retaining or rendering its value."""
+
+    CSS = """
+    SudoPasswordScreen {
+        align: center middle;
+    }
+
+    #sudo-dialog {
+        width: 60;
+        max-width: 90%;
+        height: 4;
+        border: round $primary;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    #sudo-password {
+        height: 1;
+    }
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Container(id="sudo-dialog") as dialog:
+            dialog.border_title = "Administrator Password"
+            yield Input(
+                placeholder="Enter sudo password, then press Enter",
+                password=True,
+                compact=True,
+                id="sudo-password",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#sudo-password", Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "sudo-password":
+            self.dismiss(event.value)
+
+
 class DeviceDetailsScreen(Screen):
-    """Empty device-detail layout with plot hosts ready for later data rendering."""
+    """Show current device data alongside empty plot hosts."""
 
     HORIZONTAL_BREAKPOINTS = [(120, "wide")]
 
@@ -115,28 +438,191 @@ class DeviceDetailsScreen(Screen):
         width: 100%;
         height: 100%;
     }
+
+    #signal-plot > .plot--label,
+    #signal-plot > .plot--tick,
+    #usage-plot > .plot--label,
+    #usage-plot > .plot--tick {
+        color: lightgrey;
+        text-style: none;
+    }
+
+    #signal-plot > .plot--tick,
+    #usage-plot > .plot--tick {
+        color: #b3b3b3;
+    }
+
+    #signal-plot > .plot--axis,
+    #usage-plot > .plot--axis {
+        color: #b3b3b3;
+    }
     """
 
     BINDINGS = [("escape", "back", "Back")]
 
+    def __init__(self, store: SqliteSnapshotStore, device_id: str) -> None:
+        super().__init__()
+        self._store = store
+        self._device_id = device_id
+        self._plots_ready = False
+
     def compose(self) -> ComposeResult:
-        with Container(id="details-device", classes="details-panel") as device_panel:
+        with VerticalScroll(
+            id="details-device", classes="details-panel"
+        ) as device_panel:
             device_panel.border_title = "Device"
-            yield Static()
+            yield Static(id="device-details")
 
         with Container(id="details-signal", classes="details-panel") as signal_panel:
-            signal_panel.border_title = "Signal"
-            yield PlotWidget(id="signal-plot")
+            signal_panel.border_title = "LTE Signal Level"
+            yield _DateBoundedPlot(id="signal-plot")
 
         with Container(id="details-usage", classes="details-panel") as usage_panel:
-            usage_panel.border_title = "Usage"
-            yield PlotWidget(id="usage-plot")
+            usage_panel.border_title = "Cellular Data Usage"
+            yield _DateBoundedPlot(id="usage-plot")
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         for plot in self.query(PlotWidget):
             plot.margin_top = 0
-            plot.margin_bottom = 2
-            plot.margin_left = 8
+            plot.margin_left = 10
+        self.query_one("#signal-plot", PlotWidget).margin_bottom = 2
+        self.query_one("#usage-plot", PlotWidget).margin_bottom = 2
+        await self._load_device_details()
+        self.call_after_refresh(self._initialize_plots)
+
+    async def _load_device_details(self) -> None:
+        details = await self._store.get_device_details(self._device_id)
+        content = self.query_one("#device-details", Static)
+        if details is None:
+            content.update(Text("Device is no longer available.", style="grey70"))
+            return
+
+        device, clients = details
+        device_events = await self._store.get_device_events(self._device_id)
+        self.query_one("#details-device", VerticalScroll).border_title = str(
+            device["name"]
+        )
+        content.update(_device_details_text(device, clients, device_events))
+
+    async def refresh_after_sync(self) -> None:
+        """Refresh current details and plots after a poll."""
+        await self._load_device_details()
+        await self.refresh_plots()
+
+    async def _initialize_plots(self) -> None:
+        """Draw after the initial layout establishes the plot widths."""
+        self._plots_ready = True
+        await self.refresh_plots()
+
+    async def refresh_plots(self) -> None:
+        """Refresh both rolling plots using the current plot dimensions."""
+        await self.refresh_signal_plot()
+        await self.refresh_usage_plot()
+
+    async def refresh_signal_plot(self) -> None:
+        """Render the newest LTE samples at one Braille X-dot per sample."""
+        plot = self.query_one("#signal-plot", _DateBoundedPlot)
+        sample_limit = max(1, (plot.size.width - plot.margin_left) * 2)
+        samples = await self._store.get_device_signal_samples(
+            self._device_id, sample_limit
+        )
+
+        plot.clear()
+        plot.set_x_formatter(_LocalTimestampFormatter())
+        plot.set_y_formatter(_SignalLevelFormatter())
+        plot.set_yticks([0, 1, 2, 3])
+        plot.set_ylimits(-0.25, 3.25)
+        plot.set_ylabel("LTE Signal")
+        if not samples:
+            return
+
+        all_x_values = []
+        points_by_level = {level: ([], []) for level in _SIGNAL_LEVELS}
+        for sample in samples:
+            sampled_at = datetime.fromisoformat(str(sample["sampled_at"]))
+            if sampled_at.tzinfo is None:
+                sampled_at = sampled_at.replace(tzinfo=timezone.utc)
+            level = str(sample["lte_signal_level"])
+            x_values, y_values = points_by_level[level]
+            timestamp = sampled_at.timestamp()
+            all_x_values.append(timestamp)
+            x_values.append(timestamp)
+            y_values.append(_SIGNAL_LEVELS[level])
+
+        if len(all_x_values) == 1:
+            plot.set_xlimits(all_x_values[0] - 30, all_x_values[0] + 30)
+        else:
+            plot.set_xlimits(all_x_values[0], all_x_values[-1])
+        plot.set_sampled_at_bounds(all_x_values[0], all_x_values[-1])
+        for level, (level_x_values, level_y_values) in points_by_level.items():
+            if level_x_values:
+                plot.scatter(
+                    level_x_values,
+                    level_y_values,
+                    marker_style=_SIGNAL_STYLES[level],
+                    hires_mode=HiResMode.BRAILLE,
+                )
+
+    async def refresh_usage_plot(self) -> None:
+        """Render log-scaled usage deltas at each later sample timestamp."""
+        plot = self.query_one("#usage-plot", _DateBoundedPlot)
+        point_capacity = max(1, (plot.size.width - plot.margin_left) * 2)
+        samples = await self._store.get_device_usage_samples(
+            self._device_id, point_capacity + 1
+        )
+
+        plot.clear()
+        plot.set_x_formatter(_LocalTimestampFormatter())
+        plot.set_ylabel("Usage per Poll")
+        if len(samples) < 2:
+            self._configure_usage_axis(plot, 0)
+            return
+
+        x_values = []
+        usage_deltas = []
+        log_usage_values = []
+        previous_usage = int(samples[0]["cellular_data_usage_bytes"])
+        for sample in samples[1:]:
+            sampled_at = datetime.fromisoformat(str(sample["sampled_at"]))
+            if sampled_at.tzinfo is None:
+                sampled_at = sampled_at.replace(tzinfo=timezone.utc)
+            current_usage = int(sample["cellular_data_usage_bytes"])
+            usage_delta = current_usage - previous_usage
+            previous_usage = current_usage
+            if usage_delta < 0:
+                continue
+            x_values.append(sampled_at.timestamp())
+            usage_deltas.append(usage_delta)
+            log_usage_values.append(log10(usage_delta + 1))
+
+        if not x_values:
+            self._configure_usage_axis(plot, 0)
+            return
+
+        if len(x_values) == 1:
+            plot.set_xlimits(x_values[0] - 30, x_values[0] + 30)
+        else:
+            plot.set_xlimits(x_values[0], x_values[-1])
+        plot.set_sampled_at_bounds(x_values[0], x_values[-1])
+        self._configure_usage_axis(plot, max(usage_deltas))
+        plot.scatter(
+            x_values,
+            log_usage_values,
+            marker_style="green1",
+            hires_mode=HiResMode.BRAILLE,
+        )
+
+    @staticmethod
+    def _configure_usage_axis(plot: _DateBoundedPlot, maximum_delta: int) -> None:
+        tick_bytes = _usage_tick_bytes(maximum_delta)
+        formatter = _UsageByteFormatter(tick_bytes)
+        plot.set_y_formatter(formatter)
+        plot.set_yticks(formatter.get_ticks(0, 0))
+        plot.set_ylimits(-0.25, formatter.get_ticks(0, 0)[-1] + 0.25)
+
+    def on_resize(self, _: events.Resize) -> None:
+        if self._plots_ready:
+            self.call_after_refresh(self.refresh_plots)
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -150,6 +636,21 @@ class UbiApp(App):
         height: 3;
         border: round $primary;
         padding: 0 1;
+    }
+
+    #service-status {
+        width: 1fr;
+        height: 100%;
+        content-align: left middle;
+    }
+
+    #service-action {
+        width: 21;
+        min-width: 21;
+        max-width: 21;
+        height: 1;
+        content-align: center middle;
+        text-align: center;
     }
 
     #devices-panel {
@@ -194,24 +695,25 @@ class UbiApp(App):
         ("f", "filter", "Filter"),
     ]
 
-    service_running = reactive(False)
-
     def __init__(self) -> None:
         super().__init__()
         self._store = SqliteSnapshotStore()
-        self._api_client: MobilityApiClient | None = None
-        self._daemon_stop_event: asyncio.Event | None = None
-        self._daemon_task: asyncio.Task[None] | None = None
+        self._systemd = SystemdService()
+        self._service_enabled = "unknown"
+        self._service_active = "unknown"
         self._filter_text = ""
         self._filter_pattern: re.Pattern[str] | None = None
 
     def compose(self) -> ComposeResult:
-        service_panel = Container(
-            Static(self.service_status_text(), id="service-status"),
-            id="service-panel",
-        )
-        service_panel.border_title = "monitorUbi"
-        yield service_panel
+        with Horizontal(id="service-panel") as service_panel:
+            service_panel.border_title = "monitorUbi"
+            yield Static(self.service_status_text(), id="service-status")
+            yield Button(
+                "Install Service",
+                id="service-action",
+                variant="primary",
+                compact=True,
+            )
 
         devices_panel = Container(
             DataTable(
@@ -229,10 +731,8 @@ class UbiApp(App):
         yield Static(self.footer_text(), id="footer-menu")
 
     def service_status_text(self) -> Text:
-        """Build the Rich status line from the current service state."""
-        status_icon = "√" if self.service_running else "X"
-        status_label = "running" if self.service_running else "stopped"
-        status_style = "green1" if self.service_running else "red1"
+        """Build the Rich status line from the current systemd state."""
+        status_icon, status_label, status_style = self._service_status_display()
         workspace_count = self._store.workspace_count
         device_count = self._store.device_count
         client_count = self._store.online_client_count
@@ -244,8 +744,8 @@ class UbiApp(App):
             (f" ({status_label})", status_style),
             (" | Service: ", "grey70"),
             (
-                "enabled " if self.service_running else "disabled",
-                "green1" if self.service_running else "yellow",
+                self._service_enabled,
+                "green1" if self._service_enabled == "enabled" else "yellow",
             ),
             (" | RAM Usage: ", "grey70"),
             (f"{memory_usage()}", "turquoise2"),
@@ -263,7 +763,7 @@ class UbiApp(App):
 
     def footer_text(self) -> Text:
         """Build the footer menu with the action for the current service state."""
-        service_action = "Stop " if self.service_running else "Start"
+        service_action = "Stop" if self._service_active == "active" else "Start"
         return Text.assemble(
             ("s", "bold cyan"),
             (f"={service_action}  ", ""),
@@ -291,9 +791,8 @@ class UbiApp(App):
         devices.add_column("Last-Seen", width=19)
         await self._store.refresh_current_counts()
         await self._store.refresh_history_days()
-        self.query_one("#service-status", Static).update(
-            self.service_status_text()
-        )
+        await self._refresh_systemd_state()
+        self.set_interval(5, self._refresh_systemd_state)
         await self.refresh_device_table()
 
     async def refresh_device_table(self) -> None:
@@ -316,75 +815,101 @@ class UbiApp(App):
 
         table = self.query_one("#device-table", DataTable)
         table.clear()
-        table.add_rows(view_model.table_row for view_model in filtered_view_models)
+        for view_model in filtered_view_models:
+            table.add_row(*view_model.table_row, key=view_model.device_id)
 
-    async def action_toggle_service(self) -> None:
-        if self.service_running:
-            await self._stop_monitor_runner()
-        else:
-            await self._start_monitor_runner()
-
-    async def _start_monitor_runner(self) -> None:
-        try:
-            api_client = MobilityApiClient()
-        except ValueError as error:
-            self.notify(str(error), severity="error")
+    def action_toggle_service(self) -> None:
+        if self._service_enabled == "not-found":
+            self.notify("Install monitorUbi before starting it.", severity="warning")
             return
 
-        stop_event = asyncio.Event()
-        service = MonitorService(
-            api_client,
-            self._store,
-            on_refresh=self._refresh_after_sync,
+        action = "stop" if self._service_active == "active" else "start"
+        prompt = (
+            "Stop monitorUbi service?"
+            if action == "stop"
+            else "Start monitorUbi service?"
         )
-        self._api_client = api_client
-        self._daemon_stop_event = stop_event
-        self._daemon_task = asyncio.create_task(
-            run_daemon(service, stop_event),
-            name="monitorubi-tui-runner",
+        self.push_screen(
+            ConfirmationScreen(prompt),
+            lambda confirmed: self._after_start_stop_confirmation(confirmed, action),
         )
-        self.service_running = True
 
-    async def _stop_monitor_runner(self) -> None:
-        daemon_task = self._daemon_task
-        stop_event = self._daemon_stop_event
-        api_client = self._api_client
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "service-action":
+            return
+        action = self._service_button_action()
+        if action is not None:
+            self._request_privileged_action(action)
 
-        if stop_event is not None:
-            stop_event.set()
+    def _after_start_stop_confirmation(self, confirmed: bool, action: str) -> None:
+        """Run the confirmed keyboard action after the modal has closed."""
+        if confirmed:
+            self._request_privileged_action(action)
+
+    @work(exclusive=True)
+    async def _request_privileged_action(self, action: str) -> None:
+        password = await self.push_screen_wait(SudoPasswordScreen())
+        if password is None:
+            return
 
         try:
-            if daemon_task is not None:
-                await daemon_task
+            await self._systemd.authenticate(password)
+            match action:
+                case "install":
+                    await self._systemd.install()
+                case "enable":
+                    await self._systemd.enable()
+                case "uninstall":
+                    await self._systemd.uninstall()
+                case "start":
+                    await self._systemd.start()
+                case "stop":
+                    await self._systemd.stop()
+            self.notify(f"monitorUbi service {action} completed.")
+        except SystemdError as error:
+            self.notify(f"Service {action} failed: {error}", severity="error")
         finally:
-            if api_client is not None:
-                await api_client.aclose()
-            self._api_client = None
-            self._daemon_stop_event = None
-            self._daemon_task = None
-            self.service_running = False
+            await self._refresh_systemd_state()
 
-    async def _refresh_after_sync(self, _: SyncSummary) -> None:
-        try:
-            await self._store.refresh_history_days()
-            self.query_one("#service-status", Static).update(
-                self.service_status_text()
-            )
-            await self.refresh_device_table()
-        except Exception as error:
-            self.notify(f"Dashboard refresh failed: {error}", severity="error")
-
-    async def on_unmount(self) -> None:
-        await self._stop_monitor_runner()
-
-    def watch_service_running(self) -> None:
-        """Refresh service-state displays after the reactive value changes."""
+    async def _refresh_systemd_state(self) -> None:
+        """Refresh the dashboard from the current system-wide unit state."""
+        status = await self._systemd.status()
+        self._service_enabled = status.enabled
+        self._service_active = status.active
         try:
             self.query_one("#service-status", Static).update(self.service_status_text())
             self.query_one("#footer-menu", Static).update(self.footer_text())
+            button = self.query_one("#service-action", Button)
+            action = self._service_button_action()
+            button.label = self._service_button_label(action)
+            button.disabled = action is None
         except NoMatches:
-            # Reactive values initialize before compose() has mounted these widgets.
             return
+
+    def _service_status_display(self) -> tuple[str, str, str]:
+        """Map systemctl's active state to the dashboard status vocabulary."""
+        if self._service_active == "active":
+            return "√", "running", "green1"
+        if self._service_active == "inactive":
+            return "X", "stopped", "red1"
+        return "?", self._service_active, "yellow"
+
+    def _service_button_action(self) -> str | None:
+        """Return the requested management action for the enabled unit state."""
+        return {
+            "not-found": "install",
+            "disabled": "enable",
+            "enabled": "uninstall",
+        }.get(self._service_enabled)
+
+    @staticmethod
+    def _service_button_label(action: str | None) -> str:
+        """Return the fixed-width button label for a systemd management action."""
+        return {
+            "install": "Install Service",
+            "enable": "Enable Service",
+            "uninstall": "Uninstall Service",
+        }.get(action, "Unavailable")
 
     def action_filter(self) -> None:
         self.push_screen(FilterScreen(self._filter_text), self._apply_device_filter)
@@ -401,10 +926,97 @@ class UbiApp(App):
         await self.refresh_device_table()
 
     def action_details(self) -> None:
-        if self.query_one("#device-table", DataTable).row_count == 0:
+        table = self.query_one("#device-table", DataTable)
+        if table.row_count == 0:
             self.notify("No device is selected.", severity="warning")
             return
-        self.push_screen(DeviceDetailsScreen())
+        row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+        if row_key.value is not None:
+            self.push_screen(DeviceDetailsScreen(self._store, row_key.value))
 
-    def on_data_table_row_selected(self, _: DataTable.RowSelected) -> None:
-        self.action_details()
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.row_key.value is not None:
+            self.push_screen(DeviceDetailsScreen(self._store, event.row_key.value))
+
+
+def _device_details_text(
+    device: dict[str, object], clients: list[dict[str, object]], events: list[str]
+) -> Text:
+    """Format current device and online-client data for the scrollable detail pane."""
+    text = Text()
+    for key in (
+        "id",
+        "model",
+        "state",
+        "firmware_version",
+        "mac_address",
+        "wan_source",
+        "wan_ip",
+        "enabled_wans",
+        "isp",
+        "lte_signal_level",
+        "cellular_data_usage_bytes",
+        "cellular_data_limit_bytes",
+        "memory_usage_percent",
+        "client_count",
+        "host_address",
+        "poe_passthrough",
+        "device_mode",
+        "wifi_enabled",
+        "wifi_ssid",
+        "tx_power_level",
+        "vpn_profile_name",
+        "vpn_status",
+        "firewall_rule_names",
+        "routing_rule_names",
+        "ddns_profile_names",
+        "subscription_plan",
+        "subscription_status",
+    ):
+        _append_detail_row(text, key, device[key])
+
+    uptime_seconds = device["uptime_seconds"]
+    if uptime_seconds is not None:
+        _append_detail_row(
+            text, "uptime", f"{uptime_seconds} ({uptime_seconds_to_string(uptime_seconds)})"
+        )
+
+    latitude = device["latitude"]
+    longitude = device["longitude"]
+    if latitude is None and longitude is None:
+        _append_detail_row(text, "location", None)
+    else:
+        text.append("location:\n", style=_DETAIL_LABEL_STYLE)
+        text.append("  {\n", style=_DETAIL_LABEL_STYLE)
+        text.append('    "latitude": ', style=_DETAIL_LABEL_STYLE)
+        text.append("-" if latitude is None else str(latitude), style=_DETAIL_VALUE_STYLE)
+        text.append(",\n", style=_DETAIL_LABEL_STYLE)
+        text.append('    "longitude": ', style=_DETAIL_LABEL_STYLE)
+        text.append("-" if longitude is None else str(longitude), style=_DETAIL_VALUE_STYLE)
+        text.append("\n  }\n", style=_DETAIL_LABEL_STYLE)
+
+    text.append("\nClients\n", style="bold")
+    if not clients:
+        text.append("None\n", style="turquoise2")
+    else:
+        for index, client in enumerate(clients):
+            for key in ("mac", "name", "type", "connection_status", "ip_address", "is_blocked"):
+                _append_detail_row(text, key, client[key])
+            if index < len(clients) - 1:
+                text.append("\n")
+
+    text.append("\nEvents\n", style="bold")
+    if not events:
+        text.append("None\n", style=_DETAIL_VALUE_STYLE)
+        return text
+
+    for event in events:
+        text.append(f"{event}\n", style=_DETAIL_VALUE_STYLE)
+    return text
+
+
+def _append_detail_row(text: Text, key: str, value: object) -> None:
+    """Append a styled detail label and value."""
+    text.append(f"{key}: ", style=_DETAIL_LABEL_STYLE)
+    text.append("-" if value is None else str(value), style=_DETAIL_VALUE_STYLE)
+    text.append("\n")

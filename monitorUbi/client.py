@@ -8,6 +8,7 @@ import httpx2
 from dotenv import load_dotenv
 from loguru import logger
 
+from monitorUbi.config import get_setting, load_config
 from monitorUbi.schemas import (
     ClientCollectionResponse,
     Device,
@@ -46,10 +47,17 @@ class MobilityApiClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        timeout: float | None = None,
         http_client: Optional[httpx2.AsyncClient] = None,
     ) -> None:
         self._owns_http_client = http_client is None
+        if timeout is None:
+            config, _ = load_config()
+            timeout = float(
+                get_setting(
+                    config, "client", "default_timeout_seconds", DEFAULT_TIMEOUT_SECONDS
+                )
+            )
 
         if http_client is not None:
             self._http_client = http_client
@@ -180,7 +188,7 @@ if __name__ == "__main__":
     
     configure_logging(mode="headless")
 
-    async def main():
+    async def example():
         client = MobilityApiClient()
         workspaces = await client.list_workspaces()
         print("=== WORKSPACES === \n", workspaces, "\n")
@@ -194,4 +202,4 @@ if __name__ == "__main__":
         )
         print(f"=== DEVICE {devices[0].id} CLIENTS === \n", clients, "\n")
 
-    asyncio.run(main())
+    asyncio.run(example())

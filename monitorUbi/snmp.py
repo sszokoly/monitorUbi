@@ -1,8 +1,10 @@
 """SNMP v2c trap delivery for monitorUbi device transitions."""
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from uuid import UUID
 
 from loguru import logger
 from pysnmp.hlapi.v3arch.asyncio import (
@@ -17,11 +19,27 @@ from pysnmp.hlapi.v3arch.asyncio import (
 )
 from pysnmp.proto.rfc1902 import OctetString
 
+from monitorUbi.config import get_setting, load_config
 
-SNMP_TRAP_TARGETS: list[tuple[str, int, str]] = [
-    ("192.168.1.235", 162, "public")
-]
-"""SNMP v2c targets as ``(host, port, community)`` tuples."""
+
+def _configured_trap_targets() -> list[tuple[str, int, str]]:
+    """Return TOML SNMP targets, with no targets when configuration is absent."""
+    config, _ = load_config()
+    targets = get_setting(config, "snmp", "trap_targets", [])
+    if not isinstance(targets, list):
+        raise ValueError("Configuration snmp.trap_targets must be an array")
+
+    parsed_targets = []
+    for target in targets:
+        if not isinstance(target, dict):
+            raise ValueError("Each SNMP trap target must be a table")
+        try:
+            parsed_targets.append(
+                (str(target["host"]), int(target["port"]), str(target["community"]))
+            )
+        except KeyError as error:
+            raise ValueError("Each SNMP trap target needs host, port, and community") from error
+    return parsed_targets
 
 ENTERPRISE_OID = "1.3.6.1.4.1.8247884.1"
 
@@ -50,6 +68,7 @@ class DeviceTrap:
     """A concise device-transition notification."""
 
     event: TrapEvent
+    device_id: UUID
     device_name: str
     observed_at: datetime
 
@@ -73,7 +92,7 @@ class SnmpTrapSender:
     """Send monitorUbi device traps to each configured SNMP v2c target."""
 
     def __init__(self, targets: list[tuple[str, int, str]] | None = None) -> None:
-        self._targets = SNMP_TRAP_TARGETS if targets is None else targets
+        self._targets = _configured_trap_targets() if targets is None else targets
 
     async def send(self, trap: DeviceTrap) -> None:
         """Send a trap to every target without propagating delivery failures."""
@@ -125,11 +144,10 @@ class SnmpTrapSender:
 
 
 if __name__ == "__main__":
-    import asyncio
-
     async def main() -> None:
         trap = DeviceTrap(
             event=TrapEvent.DEVICE_CONNECTED,
+            device_id=UUID("00000000-0000-0000-0000-000000000000"),
             device_name="TestDevice",
             observed_at=datetime.now(timezone.utc),
         )

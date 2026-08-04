@@ -65,6 +65,16 @@ CREATE TABLE clients (
         ON DELETE RESTRICT
 );
 
+CREATE TABLE snmp_events (
+    event_id INTEGER PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    trap_text TEXT NOT NULL,
+
+    FOREIGN KEY (device_id)
+        REFERENCES devices(id)
+        ON DELETE RESTRICT
+);
+
 CREATE TABLE device_samples (
     sample_id INTEGER PRIMARY KEY,
     sampled_at TEXT NOT NULL,
@@ -115,6 +125,7 @@ CREATE TABLE api_response_log (
 
 CREATE INDEX idx_devices_workspace_id ON devices(workspace_id);
 CREATE INDEX idx_clients_device_id ON clients(device_id);
+CREATE INDEX idx_snmp_events_device_id ON snmp_events(device_id, event_id);
 CREATE INDEX idx_device_samples_device_time ON device_samples(device_id, sampled_at);
 CREATE INDEX idx_device_samples_workspace_time ON device_samples(workspace_id, sampled_at);
 CREATE INDEX idx_client_samples_client_time ON client_samples(device_id, mac, sampled_at);

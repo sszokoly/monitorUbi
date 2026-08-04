@@ -10,6 +10,7 @@ from uuid import UUID
 
 from loguru import logger
 
+from monitorUbi.config import get_setting, load_config
 from monitorUbi.schemas import Device, DeviceClient, DeviceSummary, Workspace
 from monitorUbi.snmp import DeviceTrap, SnmpTrapSender, TrapEvent
 
@@ -56,6 +57,8 @@ class SnapshotStore(Protocol):
         workspaces_observed_at: datetime,
     ) -> None: ...
 
+    async def save_snmp_events(self, events: Sequence[DeviceTrap]) -> None: ...
+
 
 @dataclass(frozen=True)
 class SyncSummary:
@@ -97,12 +100,40 @@ class MonitorService:
         api: MobilityApi,
         store: SnapshotStore,
         *,
-        poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
-        requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE,
-        max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS,
+        poll_interval_seconds: float | None = None,
+        requests_per_minute: int | None = None,
+        max_concurrent_requests: int | None = None,
         on_refresh: RefreshCallback | None = None,
         trap_sender: SnmpTrapSender | None = None,
     ) -> None:
+        config, _ = load_config()
+        if poll_interval_seconds is None:
+            poll_interval_seconds = float(
+                get_setting(
+                    config,
+                    "service",
+                    "default_poll_interval_seconds",
+                    DEFAULT_POLL_INTERVAL_SECONDS,
+                )
+            )
+        if requests_per_minute is None:
+            requests_per_minute = int(
+                get_setting(
+                    config,
+                    "service",
+                    "default_requests_per_minute",
+                    DEFAULT_REQUESTS_PER_MINUTE,
+                )
+            )
+        if max_concurrent_requests is None:
+            max_concurrent_requests = int(
+                get_setting(
+                    config,
+                    "service",
+                    "default_max_concurrent_requests",
+                    DEFAULT_MAX_CONCURRENT_REQUESTS,
+                )
+            )
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be greater than 0")
         if max_concurrent_requests < 1:
@@ -311,6 +342,10 @@ class MonitorService:
                     )
                 )
 
+        if not traps:
+            return
+
+        await self._store.save_snmp_events(traps)
         await asyncio.gather(
             *(self._trap_sender.send(trap) for trap in traps), return_exceptions=True
         )
@@ -323,6 +358,7 @@ class MonitorService:
     ) -> DeviceTrap:
         return DeviceTrap(
             event=event,
+            device_id=snapshot.device.id,
             device_name=snapshot.device.name,
             observed_at=observed_at,
         )
@@ -348,11 +384,14 @@ if __name__ == "__main__":
                 f"{client_count} clients"
             )
 
-    async def main() -> None:
+        async def save_snmp_events(self, events: Sequence[DeviceTrap]) -> None:
+            pass
+
+    async def example() -> None:
         configure_logging("headless")
         async with MobilityApiClient() as api:
             service = MonitorService(api, ConsoleSnapshotStore())
             summary = await service.sync_once()
         print(f"Sync summary: {summary}")
 
-    asyncio.run(main())
+    asyncio.run(example())

@@ -1,6 +1,7 @@
 """Headless composition and lifecycle for monitorUbi."""
 
 import asyncio
+import signal
 
 from loguru import logger
 
@@ -28,6 +29,9 @@ async def main() -> None:
 
     store = SqliteSnapshotStore()
     stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop_event.set)
 
     async with MobilityApiClient() as api:
         service = MonitorService(api, store)

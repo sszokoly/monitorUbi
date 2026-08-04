@@ -1,33 +1,44 @@
-"""Configure Loguru sinks from the project's external YAML file."""
+"""Configure Loguru sinks from project TOML configuration."""
 
-import os
 import sys
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
-import yaml
 from loguru import logger
+
+from monitorUbi.config import get_setting, load_config
 
 
 LoggingMode = Literal["tui", "headless"]
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "logging.yaml"
+DEFAULT_HANDLERS = [
+    {
+        "sink": "ext://sys.stderr",
+        "modes": ["headless"],
+        "format": "{time:YYYY-MM-DD HH:mm:ss} | <level>{level:<8}</level> | {message}",
+        "level": "INFO",
+        "colorize": True,
+    },
+    {
+        "sink": "app.log",
+        "modes": ["tui", "headless"],
+        "format": "{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {function:<15} | {line:<3} | {message}",
+        "level": "INFO",
+        "rotation": 2048000,
+        "retention": 3,
+        "backtrace": False,
+        "diagnose": False,
+    },
+]
 
 
 def configure_logging(
-    mode: LoggingMode, config_path: Optional[str | Path] = None
+    mode: LoggingMode, config_path: str | Path | None = None
 ) -> list[int]:
-    """Replace Loguru's default sink with handlers enabled for the given mode."""
-    path = Path(config_path or os.getenv("MONITORUBI_LOG_CONFIG", DEFAULT_CONFIG_PATH))
-    try:
-        config = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except OSError as error:
-        raise RuntimeError(f"Unable to read logging configuration: {path}") from error
-    except yaml.YAMLError as error:
-        raise RuntimeError(f"Invalid logging configuration: {path}") from error
-
-    handlers = config.get("handlers") if isinstance(config, dict) else None
+    """Replace Loguru's default sink with TOML handlers for the given mode."""
+    config, path = load_config(config_path)
+    handlers = get_setting(config, "logging", "handlers", DEFAULT_HANDLERS)
     if not isinstance(handlers, list):
-        raise ValueError("Logging configuration must define a handlers list")
+        raise ValueError("Configuration logging.handlers must be an array")
 
     logger.remove()
     sink_ids: list[int] = []

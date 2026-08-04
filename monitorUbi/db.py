@@ -11,16 +11,29 @@ from typing import Sequence
 import aiosqlite
 from loguru import logger
 
+from monitorUbi.config import get_setting, load_config
 from monitorUbi.schemas import DeviceClient, Workspace
 from monitorUbi.service import DeviceSnapshot
+from monitorUbi.snmp import DeviceTrap
 
 
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 DEFAULT_DATABASE_PATH = Path(__file__).with_name("monitorUbi.db")
 
-def database_size(database_path: str | Path = DEFAULT_DATABASE_PATH) -> str:
+
+def _configured_database_path() -> Path:
+    """Return the configured database path or the package-local fallback."""
+    config, config_path = load_config()
+    value = get_setting(
+        config, "database", "default_database_path", DEFAULT_DATABASE_PATH
+    )
+    path = Path(value)
+    return path if path.is_absolute() or config is None else config_path.parent / path
+
+
+def database_size(database_path: str | Path | None = None) -> str:
     """Return the main SQLite file and WAL sidecars as a display-ready size."""
-    path = Path(database_path)
+    path = Path(database_path) if database_path is not None else _configured_database_path()
     size_bytes = sum(
         candidate.stat().st_size
         for candidate in (
@@ -102,8 +115,10 @@ async def database_connection(
 class SqliteSnapshotStore:
     """Persist the latest typed API state and append historical samples."""
 
-    def __init__(self, database_path: str | Path = DEFAULT_DATABASE_PATH) -> None:
-        self._database_path = Path(database_path)
+    def __init__(self, database_path: str | Path | None = None) -> None:
+        self._database_path = (
+            Path(database_path) if database_path is not None else _configured_database_path()
+        )
         self._workspace_count = 0
         self._device_count = 0
         self._online_client_count = 0
@@ -211,12 +226,61 @@ class SqliteSnapshotStore:
         """Delete client samples older than the requested retention period."""
         return await self._prune_samples("client_samples", retention_days)
 
+    async def save_snmp_events(self, events: Sequence[DeviceTrap]) -> None:
+        """Persist generated traps while retaining the newest 20 per device."""
+        if not events:
+            return
+
+        device_ids = {str(event.device_id) for event in events}
+        async with database_connection(self._database_path) as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                await connection.executemany(
+                    "INSERT INTO snmp_events (device_id, trap_text) VALUES (?, ?)",
+                    [(str(event.device_id), event.message) for event in events],
+                )
+                for device_id in device_ids:
+                    await connection.execute(
+                        """
+                        DELETE FROM snmp_events
+                        WHERE device_id = ?
+                          AND event_id NOT IN (
+                              SELECT event_id
+                              FROM snmp_events
+                              WHERE device_id = ?
+                              ORDER BY event_id DESC
+                              LIMIT 20
+                          )
+                        """,
+                        (device_id, device_id),
+                    )
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+
+    async def get_device_events(self, device_id: str) -> list[str]:
+        """Return the newest persisted SNMP event messages for one device."""
+        async with database_connection(self._database_path) as connection:
+            async with connection.execute(
+                """
+                SELECT trap_text
+                FROM snmp_events
+                WHERE device_id = ?
+                ORDER BY event_id DESC
+                LIMIT 20
+                """,
+                (device_id,),
+            ) as cursor:
+                return [row["trap_text"] for row in await cursor.fetchall()]
+
     async def get_device_dashboard_rows(self) -> list[dict[str, object]]:
         """Return the joined device values required by the dashboard view model."""
         async with database_connection(self._database_path) as connection:
             async with connection.execute(
                 """
                 SELECT
+                    devices.id AS device_id,
                     devices.name,
                     workspaces.workspace_name,
                     devices.state,
@@ -231,6 +295,93 @@ class SqliteSnapshotStore:
                     ON workspaces.workspace_id = devices.workspace_id
                 ORDER BY devices.name COLLATE NOCASE
                 """
+            ) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_device_details(
+        self, device_id: str
+    ) -> tuple[dict[str, object], list[dict[str, object]]] | None:
+        """Return one device and its current online clients for the detail pane."""
+        async with database_connection(self._database_path) as connection:
+            async with connection.execute(
+                """
+                SELECT
+                    id, name, model, state, firmware_version, mac_address,
+                    wan_source, wan_ip, enabled_wans, isp, lte_signal_level,
+                    cellular_data_usage_bytes, cellular_data_limit_bytes,
+                    memory_usage_percent, uptime_seconds, client_count, host_address,
+                    poe_passthrough, device_mode, wifi_enabled, wifi_ssid,
+                    tx_power_level, vpn_profile_name, vpn_status,
+                    firewall_rule_names, routing_rule_names, ddns_profile_names,
+                    subscription_plan, subscription_status, latitude, longitude,
+                    location_last_updated
+                FROM devices
+                WHERE id = ?
+                """,
+                (device_id,),
+            ) as cursor:
+                device_row = await cursor.fetchone()
+            if device_row is None:
+                return None
+
+            async with connection.execute(
+                """
+                SELECT mac, name, type, connection_status, ip_address, is_blocked
+                FROM clients
+                WHERE device_id = ? AND connection_status = 'ONLINE'
+                ORDER BY name COLLATE NOCASE, mac
+                """,
+                (device_id,),
+            ) as cursor:
+                clients = [dict(row) for row in await cursor.fetchall()]
+        return dict(device_row), clients
+
+    async def get_device_signal_samples(
+        self, device_id: str, limit: int
+    ) -> list[dict[str, object]]:
+        """Return the newest valid LTE signal samples in chronological order."""
+        if limit < 1:
+            return []
+
+        async with database_connection(self._database_path) as connection:
+            async with connection.execute(
+                """
+                SELECT sampled_at, lte_signal_level
+                FROM (
+                    SELECT sampled_at, lte_signal_level
+                    FROM device_samples
+                    WHERE device_id = ?
+                      AND lte_signal_level IN ('NO_SIGNAL', 'POOR', 'FAIR', 'STRONG')
+                    ORDER BY sampled_at DESC
+                    LIMIT ?
+                )
+                ORDER BY sampled_at
+                """,
+                (device_id, limit),
+            ) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_device_usage_samples(
+        self, device_id: str, limit: int
+    ) -> list[dict[str, object]]:
+        """Return the newest cellular-usage samples in chronological order."""
+        if limit < 1:
+            return []
+
+        async with database_connection(self._database_path) as connection:
+            async with connection.execute(
+                """
+                SELECT sampled_at, cellular_data_usage_bytes
+                FROM (
+                    SELECT sampled_at, cellular_data_usage_bytes
+                    FROM device_samples
+                    WHERE device_id = ?
+                    ORDER BY sampled_at DESC
+                    LIMIT ?
+                )
+                ORDER BY sampled_at
+                """,
+                (device_id, limit),
             ) as cursor:
                 return [dict(row) for row in await cursor.fetchall()]
 
@@ -568,7 +719,7 @@ if __name__ == "__main__":
     from monitorUbi.logging_setup import configure_logging
     from monitorUbi.service import MonitorService
 
-    async def main() -> None:
+    async def example() -> None:
         configure_logging("headless")
         test_db_path = Path(__file__).with_name("test.db")
         async with MobilityApiClient() as api:
@@ -576,4 +727,4 @@ if __name__ == "__main__":
             summary = await service.sync_once()
         print(f"Sync summary: {summary}")
 
-    asyncio.run(main())
+    asyncio.run(example())
