@@ -5,10 +5,10 @@ def memory_usage() -> str:
     process = psutil.Process(os.getpid())
     mem_info = process.memory_info()
     if mem_info.rss >= 1024**3: 
-        return f"{mem_info.rss / 1024**3:5.1f} GB"
+        return f"{mem_info.rss / 1024**3:7.1f} GB"
     elif mem_info.rss >= 1024**2:
-        return f"{mem_info.rss / 1024**2:5.1f} MB"
-    return f"{mem_info.rss / 1024:5.1f} KB"
+        return f"{mem_info.rss / 1024**2:7.1f} MB"
+    return f"{mem_info.rss / 1024:7.1f} KB"
 
 def uptime_seconds_to_string(uptime_seconds: int) -> str:
     days, remainder = divmod(uptime_seconds, 86400)

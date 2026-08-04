@@ -50,8 +50,15 @@ class SystemdService:
         )
 
     async def authenticate(self, password: str) -> None:
-        """Validate sudo credentials once before running a privileged operation."""
+        """Force validation of sudo credentials before a privileged operation."""
+        await self.clear_authentication()
         result = await self._run("sudo", "-S", "-p", "", "-v", input_text=password)
+        if result.returncode:
+            raise SystemdError(_command_error(result))
+
+    async def clear_authentication(self) -> None:
+        """Discard the cached sudo ticket for the current user."""
+        result = await self._run("sudo", "-k")
         if result.returncode:
             raise SystemdError(_command_error(result))
 

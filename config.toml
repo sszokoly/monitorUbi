@@ -10,6 +10,9 @@ default_poll_interval_seconds = 60.0
 default_requests_per_minute = 60
 default_max_concurrent_requests = 4
 
+[tui]
+dashboard_refresh_interval_seconds = 10.0
+
 [snmp]
 trap_targets = [
   { host = "192.168.1.235", port = 162, community = "public" },

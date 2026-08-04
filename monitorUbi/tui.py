@@ -14,6 +14,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Input, Static
 from textual_hires_canvas import Canvas, TextAlign
 from textual_plot import HiResMode, NumericAxisFormatter, PlotWidget
+from monitorUbi.config import get_setting, load_config
 from monitorUbi.db import SqliteSnapshotStore, database_size
 from monitorUbi.systemd import SystemdError, SystemdService
 from monitorUbi.utils import memory_usage, uptime_seconds_to_string
@@ -29,6 +30,23 @@ _SIGNAL_STYLES = {
     "FAIR": "yellow",
     "STRONG": "green1",
 }
+DEFAULT_DASHBOARD_REFRESH_INTERVAL_SECONDS = 5.0
+
+
+def _dashboard_refresh_interval_seconds() -> float:
+    """Return the configured dashboard refresh interval."""
+    config, _ = load_config()
+    interval = float(
+        get_setting(
+            config,
+            "tui",
+            "dashboard_refresh_interval_seconds",
+            DEFAULT_DASHBOARD_REFRESH_INTERVAL_SECONDS,
+        )
+    )
+    if interval <= 0:
+        raise ValueError("dashboard_refresh_interval_seconds must be greater than 0")
+    return interval
 
 
 def _usage_tick_bytes(maximum: int) -> list[int]:
@@ -114,6 +132,20 @@ class _DateBoundedPlot(PlotWidget):
         """Set the available sample-time range used to clamp navigation."""
         self._sampled_at_min = minimum
         self._sampled_at_max = maximum
+
+    def capture_x_viewport(self) -> tuple[float, float, bool] | None:
+        """Capture the visible range and whether it follows the newest sample."""
+        if self._sampled_at_max is None:
+            return None
+        return self._x_min, self._x_max, self._x_max >= self._sampled_at_max
+
+    def restore_x_viewport(self, viewport: tuple[float, float, bool]) -> None:
+        """Restore a manually panned range inside the current sample bounds."""
+        minimum, maximum, follows_latest = viewport
+        if follows_latest:
+            return
+        self.set_xlimits(minimum, maximum)
+        self._clamp_x_limits()
 
     def _render_plot(self) -> None:
         """Render the base plot without its top frame edge or top tick marks."""
@@ -465,6 +497,8 @@ class DeviceDetailsScreen(Screen):
         self._store = store
         self._device_id = device_id
         self._plots_ready = False
+        self._signal_latest_sampled_at: str | None = None
+        self._usage_latest_sampled_at: str | None = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(
@@ -514,18 +548,27 @@ class DeviceDetailsScreen(Screen):
         self._plots_ready = True
         await self.refresh_plots()
 
-    async def refresh_plots(self) -> None:
+    async def refresh_plots(self, *, force: bool = False) -> None:
         """Refresh both rolling plots using the current plot dimensions."""
-        await self.refresh_signal_plot()
-        await self.refresh_usage_plot()
+        await self.refresh_signal_plot(force=force)
+        await self.refresh_usage_plot(force=force)
 
-    async def refresh_signal_plot(self) -> None:
+    async def refresh_signal_plot(self, *, force: bool = False) -> None:
         """Render the newest LTE samples at one Braille X-dot per sample."""
         plot = self.query_one("#signal-plot", _DateBoundedPlot)
         sample_limit = max(1, (plot.size.width - plot.margin_left) * 2)
         samples = await self._store.get_device_signal_samples(
             self._device_id, sample_limit
         )
+        latest_sampled_at = str(samples[-1]["sampled_at"]) if samples else None
+        if (
+            not force
+            and latest_sampled_at is not None
+            and latest_sampled_at == self._signal_latest_sampled_at
+        ):
+            return
+
+        viewport = plot.capture_x_viewport()
 
         plot.clear()
         plot.set_x_formatter(_LocalTimestampFormatter())
@@ -534,6 +577,7 @@ class DeviceDetailsScreen(Screen):
         plot.set_ylimits(-0.25, 3.25)
         plot.set_ylabel("LTE Signal")
         if not samples:
+            self._signal_latest_sampled_at = None
             return
 
         all_x_values = []
@@ -554,6 +598,8 @@ class DeviceDetailsScreen(Screen):
         else:
             plot.set_xlimits(all_x_values[0], all_x_values[-1])
         plot.set_sampled_at_bounds(all_x_values[0], all_x_values[-1])
+        if viewport is not None:
+            plot.restore_x_viewport(viewport)
         for level, (level_x_values, level_y_values) in points_by_level.items():
             if level_x_values:
                 plot.scatter(
@@ -562,20 +608,31 @@ class DeviceDetailsScreen(Screen):
                     marker_style=_SIGNAL_STYLES[level],
                     hires_mode=HiResMode.BRAILLE,
                 )
+        self._signal_latest_sampled_at = latest_sampled_at
 
-    async def refresh_usage_plot(self) -> None:
+    async def refresh_usage_plot(self, *, force: bool = False) -> None:
         """Render log-scaled usage deltas at each later sample timestamp."""
         plot = self.query_one("#usage-plot", _DateBoundedPlot)
         point_capacity = max(1, (plot.size.width - plot.margin_left) * 2)
         samples = await self._store.get_device_usage_samples(
             self._device_id, point_capacity + 1
         )
+        latest_sampled_at = str(samples[-1]["sampled_at"]) if samples else None
+        if (
+            not force
+            and latest_sampled_at is not None
+            and latest_sampled_at == self._usage_latest_sampled_at
+        ):
+            return
+
+        viewport = plot.capture_x_viewport()
 
         plot.clear()
         plot.set_x_formatter(_LocalTimestampFormatter())
         plot.set_ylabel("Usage per Poll")
         if len(samples) < 2:
             self._configure_usage_axis(plot, 0)
+            self._usage_latest_sampled_at = latest_sampled_at
             return
 
         x_values = []
@@ -597,6 +654,7 @@ class DeviceDetailsScreen(Screen):
 
         if not x_values:
             self._configure_usage_axis(plot, 0)
+            self._usage_latest_sampled_at = latest_sampled_at
             return
 
         if len(x_values) == 1:
@@ -604,6 +662,8 @@ class DeviceDetailsScreen(Screen):
         else:
             plot.set_xlimits(x_values[0], x_values[-1])
         plot.set_sampled_at_bounds(x_values[0], x_values[-1])
+        if viewport is not None:
+            plot.restore_x_viewport(viewport)
         self._configure_usage_axis(plot, max(usage_deltas))
         plot.scatter(
             x_values,
@@ -611,6 +671,7 @@ class DeviceDetailsScreen(Screen):
             marker_style="green1",
             hires_mode=HiResMode.BRAILLE,
         )
+        self._usage_latest_sampled_at = latest_sampled_at
 
     @staticmethod
     def _configure_usage_axis(plot: _DateBoundedPlot, maximum_delta: int) -> None:
@@ -622,7 +683,7 @@ class DeviceDetailsScreen(Screen):
 
     def on_resize(self, _: events.Resize) -> None:
         if self._plots_ready:
-            self.call_after_refresh(self.refresh_plots)
+            self.call_after_refresh(lambda: self.refresh_plots(force=True))
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -701,6 +762,8 @@ class UbiApp(App):
         self._systemd = SystemdService()
         self._service_enabled = "unknown"
         self._service_active = "unknown"
+        self._dashboard_refresh_interval_seconds = _dashboard_refresh_interval_seconds()
+        self._device_table_signature: tuple[DeviceDashboardViewModel, ...] | None = None
         self._filter_text = ""
         self._filter_pattern: re.Pattern[str] | None = None
 
@@ -789,11 +852,11 @@ class UbiApp(App):
         devices.add_column("Usage", width=10)
         devices.add_column("Clients", width=7)
         devices.add_column("Last-Seen", width=19)
-        await self._store.refresh_current_counts()
-        await self._store.refresh_history_days()
-        await self._refresh_systemd_state()
-        self.set_interval(5, self._refresh_systemd_state)
-        await self.refresh_device_table()
+        await self._refresh_dashboard()
+        self.set_interval(
+            self._dashboard_refresh_interval_seconds, self._refresh_dashboard
+        )
+        devices.focus()
 
     async def refresh_device_table(self) -> None:
         """Load persisted device data and format it for the dashboard table."""
@@ -814,9 +877,36 @@ class UbiApp(App):
         ]
 
         table = self.query_one("#device-table", DataTable)
+        signature = tuple(filtered_view_models)
+        if signature == self._device_table_signature:
+            return
+
+        selected_device_id = None
+        if table.row_count:
+            row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+            selected_device_id = row_key.value
         table.clear()
         for view_model in filtered_view_models:
             table.add_row(*view_model.table_row, key=view_model.device_id)
+        self._device_table_signature = signature
+
+        if selected_device_id is not None:
+            for row_index, view_model in enumerate(filtered_view_models):
+                if view_model.device_id == selected_device_id:
+                    table.move_cursor(row=row_index)
+                    break
+
+    async def _refresh_dashboard(self) -> None:
+        """Refresh persisted dashboard data and system service state."""
+        try:
+            await self._store.refresh_current_counts()
+            await self._store.refresh_history_days()
+            await self.refresh_device_table()
+            if isinstance(self.screen, DeviceDetailsScreen):
+                await self.screen.refresh_after_sync()
+            await self._refresh_systemd_state()
+        except Exception as error:
+            self.notify(f"Dashboard refresh failed: {error}", severity="error")
 
     def action_toggle_service(self) -> None:
         if self._service_enabled == "not-found":
@@ -852,6 +942,7 @@ class UbiApp(App):
         if password is None:
             return
 
+        completed = False
         try:
             await self._systemd.authenticate(password)
             match action:
@@ -865,11 +956,18 @@ class UbiApp(App):
                     await self._systemd.start()
                 case "stop":
                     await self._systemd.stop()
+            completed = True
             self.notify(f"monitorUbi service {action} completed.")
         except SystemdError as error:
             self.notify(f"Service {action} failed: {error}", severity="error")
         finally:
+            try:
+                await self._systemd.clear_authentication()
+            except SystemdError as error:
+                self.notify(f"Could not clear sudo authentication: {error}", severity="error")
             await self._refresh_systemd_state()
+            if completed and action in {"install", "uninstall"}:
+                self.query_one("#device-table", DataTable).focus()
 
     async def _refresh_systemd_state(self) -> None:
         """Refresh the dashboard from the current system-wide unit state."""
@@ -923,6 +1021,7 @@ class UbiApp(App):
         self._filter_pattern = (
             re.compile(filter_text, re.IGNORECASE) if filter_text else None
         )
+        self._device_table_signature = None
         await self.refresh_device_table()
 
     def action_details(self) -> None:
