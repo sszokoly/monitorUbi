@@ -80,6 +80,10 @@ def application_context():
     
     Sets up logging, configures terminal, and ensures proper cleanup.
     """
+    if not sys.stdin.isatty():
+        yield
+        return
+
     # Set up logging
     # loglevel = CONFIG["loglevel"].upper()
 
