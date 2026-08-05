@@ -36,6 +36,11 @@ daemon use the shared SQLite database at
 Users other than the deployment owner run the TUI in read-only observer mode.
 They can view the shared dashboard but cannot manage the system service.
 
+Only `root` and the Unix user who owns `/opt/monitorUbi` can install, enable,
+start, stop, or uninstall the singleton `monitorUbi.service`; these operations
+require that user's sudo password. When `/opt/monitorUbi` does not yet exist,
+the first user to install the service becomes the deployment owner.
+
 For an installation created before this deployment flow, select **Uninstall
 Service**, then **Install Service** after restarting the TUI. This replaces the
 old unit that executed from the SELinux-restricted project directory under
