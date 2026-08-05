@@ -35,9 +35,7 @@ def change_terminal(to_type="xterm-256color"):
     if to_type != old_term:
         if to_type in available_types:
             os.environ["TERM"] = to_type
-            #logger.info(f"Changed terminal to '{to_type}'")
         else:
-            #logger.error(f"Terminal {to_type} is not available")
             pass
 
     return old_term
@@ -66,12 +64,10 @@ def terminal_context(term_type="xterm-256color"):
         try:
             locale.setlocale(locale.LC_ALL, old_locale)
         except locale.Error as e:
-            #logger.error(f"Failed to restore locale {old_locale}: {e}")
             pass
 
         if term_type != old_term:
             os.environ["TERM"] = old_term
-            #logger.info(f"Changed terminal to '{old_term}'")
 
 @contextmanager
 def application_context():
@@ -84,19 +80,6 @@ def application_context():
         yield
         return
 
-    # Set up logging
-    # loglevel = CONFIG["loglevel"].upper()
-
-    # if loglevel not in ("NOTSET", "DISABLED", "NONE"):
-    #     logging.basicConfig(
-    #         format=LOG_FORMAT,
-    #         filename=CONFIG["logfile"],
-    #         level=loglevel
-    #     )
-    # else:
-    #     logging.disable(logging.CRITICAL)
-
-    # Save terminal state for restoration
     fd = sys.stdin.fileno()
     orig_term = termios.tcgetattr(fd)
 
