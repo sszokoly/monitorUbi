@@ -758,8 +758,9 @@ class UbiApp(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self._store = SqliteSnapshotStore()
+        self._store = SqliteSnapshotStore(read_only=True)
         self._systemd = SystemdService()
+        self._can_manage_service = self._systemd.can_manage()
         self._service_enabled = "unknown"
         self._service_active = "unknown"
         self._dashboard_refresh_interval_seconds = _dashboard_refresh_interval_seconds()
@@ -827,16 +828,20 @@ class UbiApp(App):
     def footer_text(self) -> Text:
         """Build the footer menu with the action for the current service state."""
         service_action = "Stop" if self._service_active == "active" else "Start"
-        return Text.assemble(
-            ("s", "bold cyan"),
-            (f"={service_action}  ", ""),
-            ("q", "bold cyan"),
-            ("=Quit  ", ""),
-            ("f", "bold cyan"),
-            ("=Filter  ", ""),
-            ("Enter", "bold cyan"),
-            ("=Details", ""),
+        entries: list[tuple[str, str]] = []
+        if self._can_manage_service:
+            entries.extend((("s", "bold cyan"), (f"={service_action}  ", "")))
+        entries.extend(
+            (
+                ("q", "bold cyan"),
+                ("=Quit  ", ""),
+                ("f", "bold cyan"),
+                ("=Filter  ", ""),
+                ("Enter", "bold cyan"),
+                ("=Details", ""),
+            )
         )
+        return Text.assemble(*entries)
 
     async def on_mount(self) -> None:
         self.title = "monitorUbi"
@@ -899,16 +904,22 @@ class UbiApp(App):
     async def _refresh_dashboard(self) -> None:
         """Refresh persisted dashboard data and system service state."""
         try:
-            await self._store.refresh_current_counts()
-            await self._store.refresh_history_days()
-            await self.refresh_device_table()
-            if isinstance(self.screen, DeviceDetailsScreen):
-                await self.screen.refresh_after_sync()
+            if self._store.database_exists:
+                await self._store.refresh_current_counts()
+                await self._store.refresh_history_days()
+                await self.refresh_device_table()
+                if isinstance(self.screen, DeviceDetailsScreen):
+                    await self.screen.refresh_after_sync()
+            else:
+                self._device_table_signature = None
             await self._refresh_systemd_state()
         except Exception as error:
             self.notify(f"Dashboard refresh failed: {error}", severity="error")
 
     def action_toggle_service(self) -> None:
+        if not self._can_manage_service:
+            self.notify("Only the service owner can manage monitorUbi.", severity="warning")
+            return
         if self._service_enabled == "not-found":
             self.notify("Install monitorUbi before starting it.", severity="warning")
             return
@@ -926,6 +937,8 @@ class UbiApp(App):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "service-action":
+            return
+        if not self._can_manage_service:
             return
         action = self._service_button_action()
         if action is not None:
@@ -979,8 +992,12 @@ class UbiApp(App):
             self.query_one("#footer-menu", Static).update(self.footer_text())
             button = self.query_one("#service-action", Button)
             action = self._service_button_action()
-            button.label = self._service_button_label(action)
-            button.disabled = action is None
+            button.label = (
+                self._service_button_label(action)
+                if self._can_manage_service
+                else "Observer Mode"
+            )
+            button.disabled = action is None or not self._can_manage_service
         except NoMatches:
             return
 

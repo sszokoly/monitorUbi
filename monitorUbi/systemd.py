@@ -2,6 +2,7 @@
 
 import asyncio
 import getpass
+import os
 import shlex
 import tempfile
 from dataclasses import dataclass
@@ -48,6 +49,15 @@ class SystemdService:
         return SystemdStatus(
             enabled=_state_output(enabled), active=_state_output(active)
         )
+
+    def can_manage(self) -> bool:
+        """Whether the current user owns this singleton service deployment."""
+        if os.geteuid() == 0:
+            return True
+        try:
+            return self._deployment_root.stat().st_uid == os.geteuid()
+        except FileNotFoundError:
+            return True
 
     async def authenticate(self, password: str) -> None:
         """Force validation of sudo credentials before a privileged operation."""

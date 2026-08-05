@@ -50,13 +50,22 @@ def database_size(database_path: str | Path | None = None) -> str:
         return f"{size_bytes / 1024**2:5.1f} MB"
     return f"{size_bytes / 1024:5.1f} KB"
 
-async def open_database(database_path: str | Path) -> aiosqlite.Connection:
-    """Open a configured SQLite connection and apply pending migrations."""
-    connection = await aiosqlite.connect(database_path)
+async def open_database(
+    database_path: str | Path, *, read_only: bool = False
+) -> aiosqlite.Connection:
+    """Open SQLite, applying write-only configuration when permitted."""
+    path = Path(database_path)
+    if read_only:
+        connection = await aiosqlite.connect(
+            f"{path.resolve().as_uri()}?mode=ro", uri=True
+        )
+    else:
+        connection = await aiosqlite.connect(path)
     connection.row_factory = aiosqlite.Row
     await connection.execute("PRAGMA foreign_keys = ON")
-    await connection.execute("PRAGMA journal_mode = WAL")
-    await apply_migrations(connection)
+    if not read_only:
+        await connection.execute("PRAGMA journal_mode = WAL")
+        await apply_migrations(connection)
     return connection
 
 
@@ -103,9 +112,11 @@ async def apply_migrations(connection: aiosqlite.Connection) -> None:
 @asynccontextmanager
 async def database_connection(
     database_path: str | Path,
+    *,
+    read_only: bool = False,
 ) ->  AsyncGenerator[aiosqlite.Connection, None]:
     """Yield an initialized database connection and close it afterwards."""
-    connection = await open_database(database_path)
+    connection = await open_database(database_path, read_only=read_only)
     try:
         yield connection
     finally:
@@ -115,7 +126,9 @@ async def database_connection(
 class SqliteSnapshotStore:
     """Persist the latest typed API state and append historical samples."""
 
-    def __init__(self, database_path: str | Path | None = None) -> None:
+    def __init__(
+        self, database_path: str | Path | None = None, *, read_only: bool = False
+    ) -> None:
         self._database_path = (
             Path(database_path) if database_path is not None else _configured_database_path()
         )
@@ -123,6 +136,7 @@ class SqliteSnapshotStore:
         self._device_count = 0
         self._online_client_count = 0
         self._history_days = 0
+        self._read_only = read_only
         
     @property
     def workspace_count(self) -> int:
@@ -144,9 +158,16 @@ class SqliteSnapshotStore:
         """Return the cached number of days of historical data."""
         return self._history_days
 
+    @property
+    def database_exists(self) -> bool:
+        """Whether the configured SQLite database is available to this store."""
+        return self._database_path.exists()
+
     async def refresh_current_counts(self) -> None:
         """Load current workspace, device, and online-client counts from SQLite."""
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             counts = await self._query_current_counts(connection)
         self._set_current_counts(*counts)
 
@@ -156,7 +177,9 @@ class SqliteSnapshotStore:
 
     async def get_device_sample_history_days(self) -> int:
         """Return complete elapsed days since the oldest device sample."""
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             async with connection.execute(
                 "SELECT MIN(sampled_at) AS oldest_sampled_at FROM device_samples"
             ) as cursor:
@@ -194,7 +217,9 @@ class SqliteSnapshotStore:
             clients=client_count,
         )
 
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             try:
                 await self._upsert_workspaces(
@@ -232,7 +257,9 @@ class SqliteSnapshotStore:
             return
 
         device_ids = {str(event.device_id) for event in events}
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             await connection.execute("BEGIN IMMEDIATE")
             try:
                 await connection.executemany(
@@ -261,7 +288,9 @@ class SqliteSnapshotStore:
 
     async def get_device_events(self, device_id: str) -> list[str]:
         """Return the newest persisted SNMP event messages for one device."""
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             async with connection.execute(
                 """
                 SELECT trap_text
@@ -276,7 +305,9 @@ class SqliteSnapshotStore:
 
     async def get_device_dashboard_rows(self) -> list[dict[str, object]]:
         """Return the joined device values required by the dashboard view model."""
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             async with connection.execute(
                 """
                 SELECT
@@ -302,7 +333,9 @@ class SqliteSnapshotStore:
         self, device_id: str
     ) -> tuple[dict[str, object], list[dict[str, object]]] | None:
         """Return one device and its current online clients for the detail pane."""
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             async with connection.execute(
                 """
                 SELECT
@@ -343,7 +376,9 @@ class SqliteSnapshotStore:
         if limit < 1:
             return []
 
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             async with connection.execute(
                 """
                 SELECT sampled_at, lte_signal_level
@@ -368,7 +403,9 @@ class SqliteSnapshotStore:
         if limit < 1:
             return []
 
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             async with connection.execute(
                 """
                 SELECT sampled_at, cellular_data_usage_bytes
@@ -419,7 +456,9 @@ class SqliteSnapshotStore:
             raise ValueError(f"Unsupported sample table: {table_name}")
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-        async with database_connection(self._database_path) as connection:
+        async with database_connection(
+            self._database_path, read_only=self._read_only
+        ) as connection:
             cursor = await connection.execute(
                 f"DELETE FROM {table_name} WHERE sampled_at < ?",
                 (_timestamp_text(cutoff),),

@@ -33,6 +33,9 @@ The monitor service then runs independently of the TUI. Both the TUI and
 daemon use the shared SQLite database at
 `/opt/monitorUbi/monitorUbi/monitorUbi.db`.
 
+Users other than the deployment owner run the TUI in read-only observer mode.
+They can view the shared dashboard but cannot manage the system service.
+
 For an installation created before this deployment flow, select **Uninstall
 Service**, then **Install Service** after restarting the TUI. This replaces the
 old unit that executed from the SELinux-restricted project directory under
