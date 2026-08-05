@@ -1,6 +1,26 @@
 # monitorUbi
 Monitor Ubiquiti UMR via Cloud API
 
+## API Key
+
+monitorUbi requires a Ubiquiti UniFi Cloud API key with access to the Mobility
+workspaces and devices being monitored. Set the key in a `.env` file at the
+project root:
+
+```dotenv
+UBI_API_KEY=your-api-key
+```
+
+The application loads this file automatically. Do not commit the key; `.env`
+is ignored by Git. Restrict access to the file:
+
+```bash
+chmod 600 .env
+```
+
+The **Install Service** deployment copies this file to `/opt/monitorUbi/.env`,
+where the system service loads it.
+
 ## System Service
 
 Use the **Install Service** button in the TUI to:
