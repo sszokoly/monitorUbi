@@ -8,6 +8,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from monitorUbi.deployment import deploy_runtime
+
 
 UNIT_NAME = "monitorUbi.service"
 UNIT_PATH = Path("/etc/systemd/system") / UNIT_NAME
@@ -139,28 +141,25 @@ class SystemdService:
 
     async def _deploy_runtime(self) -> None:
         """Copy source and dependencies into /opt with an executable SELinux label."""
-        await self._run_privileged("install", "-d", "-m", "0755", self._deployment_root)
+        owner = f"{os.geteuid()}:{os.getegid()}"
         await self._run_privileged(
-            "rsync",
-            "-a",
-            "--delete",
-            "--exclude=.git",
-            "--exclude=.venv",
-            "--exclude=__pycache__",
-            "--exclude=*.db",
-            "--exclude=*.db-wal",
-            "--exclude=*.db-shm",
-            "--exclude=app.log",
-            f"{self._project_root}/",
-            f"{self._deployment_root}/",
+            "install",
+            "-d",
+            "-m",
+            "0755",
+            "-o",
+            str(os.geteuid()),
+            "-g",
+            str(os.getegid()),
+            self._deployment_root,
         )
-        await self._run_privileged(
-            "rsync",
-            "-a",
-            "--delete",
-            f"{self._project_root}/.venv/",
-            f"{self._deployment_root}/.venv/",
-        )
+        await self._run_privileged("chown", "-R", owner, self._deployment_root)
+        try:
+            deploy_runtime(self._project_root, self._deployment_root)
+        except OSError as error:
+            raise SystemdError(f"Could not deploy application files: {error}") from error
+        except RuntimeError as error:
+            raise SystemdError(str(error)) from error
         await self._ensure_selinux_context()
         await self._run_privileged("restorecon", "-RF", self._deployment_root)
 
