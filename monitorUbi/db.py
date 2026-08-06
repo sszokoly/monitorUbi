@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Sequence
+from typing import Sequence, TypedDict
 
 import aiosqlite
 from loguru import logger
@@ -19,6 +19,49 @@ from monitorUbi.snmp import DeviceTrap
 
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 DEFAULT_DATABASE_PATH = Path(__file__).with_name("monitorUbi.db")
+
+
+class DeviceDashboardRow(TypedDict):
+    """Typed device values returned by the dashboard query."""
+
+    device_id: str
+    name: str
+    workspace_name: str
+    state: str
+    wan_ip: str | None
+    wan_source: str | None
+    lte_signal_level: str | None
+    cellular_data_usage_bytes: int
+    client_count: int
+    last_seen_at: str | None
+
+
+def _dashboard_row(row: aiosqlite.Row) -> DeviceDashboardRow:
+    """Normalize untyped SQLite values into the dashboard query contract."""
+    wan_ip = row["wan_ip"]
+    wan_source = row["wan_source"]
+    lte_signal_level = row["lte_signal_level"]
+    cellular_data_usage_bytes = row["cellular_data_usage_bytes"]
+    client_count = row["client_count"]
+    last_seen_at = row["last_seen_at"]
+    return {
+        "device_id": str(row["device_id"]),
+        "name": str(row["name"]),
+        "workspace_name": str(row["workspace_name"]),
+        "state": str(row["state"]),
+        "wan_ip": wan_ip if isinstance(wan_ip, str) else None,
+        "wan_source": wan_source if isinstance(wan_source, str) else None,
+        "lte_signal_level": (
+            lte_signal_level if isinstance(lte_signal_level, str) else None
+        ),
+        "cellular_data_usage_bytes": (
+            cellular_data_usage_bytes
+            if isinstance(cellular_data_usage_bytes, int)
+            else 0
+        ),
+        "client_count": client_count if isinstance(client_count, int) else 0,
+        "last_seen_at": last_seen_at if isinstance(last_seen_at, str) else None,
+    }
 
 
 def _configured_database_path() -> Path:
@@ -303,7 +346,7 @@ class SqliteSnapshotStore:
             ) as cursor:
                 return [row["trap_text"] for row in await cursor.fetchall()]
 
-    async def get_device_dashboard_rows(self) -> list[dict[str, object]]:
+    async def get_device_dashboard_rows(self) -> list[DeviceDashboardRow]:
         """Return the joined device values required by the dashboard view model."""
         async with database_connection(
             self._database_path, read_only=self._read_only
@@ -327,7 +370,7 @@ class SqliteSnapshotStore:
                 ORDER BY devices.name COLLATE NOCASE
                 """
             ) as cursor:
-                return [dict(row) for row in await cursor.fetchall()]
+                return [_dashboard_row(row) for row in await cursor.fetchall()]
 
     async def get_device_details(
         self, device_id: str

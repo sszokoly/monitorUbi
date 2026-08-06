@@ -123,8 +123,24 @@ class _UsageByteFormatter(NumericAxisFormatter):
 class _DateBoundedPlot(PlotWidget):
     """Plot widget with bounded horizontal navigation and date-aware X labels."""
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        *,
+        allow_pan_and_zoom: bool = True,
+        invert_mouse_wheel: bool = False,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(
+            name,
+            id,
+            classes,
+            allow_pan_and_zoom=allow_pan_and_zoom,
+            invert_mouse_wheel=invert_mouse_wheel,
+            disabled=disabled,
+        )
         self._sampled_at_min: float | None = None
         self._sampled_at_max: float | None = None
 
@@ -638,12 +654,19 @@ class DeviceDetailsScreen(Screen):
         x_values = []
         usage_deltas = []
         log_usage_values = []
-        previous_usage = int(samples[0]["cellular_data_usage_bytes"])
+        first_usage = samples[0]["cellular_data_usage_bytes"]
+        if not isinstance(first_usage, int):
+            self._configure_usage_axis(plot, 0)
+            self._usage_latest_sampled_at = latest_sampled_at
+            return
+        previous_usage = first_usage
         for sample in samples[1:]:
             sampled_at = datetime.fromisoformat(str(sample["sampled_at"]))
             if sampled_at.tzinfo is None:
                 sampled_at = sampled_at.replace(tzinfo=timezone.utc)
-            current_usage = int(sample["cellular_data_usage_bytes"])
+            current_usage = sample["cellular_data_usage_bytes"]
+            if not isinstance(current_usage, int):
+                continue
             usage_delta = current_usage - previous_usage
             previous_usage = current_usage
             if usage_delta < 0:
@@ -944,7 +967,7 @@ class UbiApp(App):
         if action is not None:
             self._request_privileged_action(action)
 
-    def _after_start_stop_confirmation(self, confirmed: bool, action: str) -> None:
+    def _after_start_stop_confirmation(self, confirmed: bool | None, action: str) -> None:
         """Run the confirmed keyboard action after the modal has closed."""
         if confirmed:
             self._request_privileged_action(action)
@@ -1020,6 +1043,9 @@ class UbiApp(App):
     @staticmethod
     def _service_button_label(action: str | None) -> str:
         """Return the fixed-width button label for a systemd management action."""
+        if action is None:
+            return "Unavailable"
+    
         return {
             "install": "Install Service",
             "enable": "Enable Service",
@@ -1092,7 +1118,7 @@ def _device_details_text(
         _append_detail_row(text, key, device[key])
 
     uptime_seconds = device["uptime_seconds"]
-    if uptime_seconds is not None:
+    if isinstance(uptime_seconds, int):
         _append_detail_row(
             text, "uptime", f"{uptime_seconds} ({uptime_seconds_to_string(uptime_seconds)})"
         )
