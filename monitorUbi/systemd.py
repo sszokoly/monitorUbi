@@ -189,6 +189,7 @@ class SystemdService:
             stdin=asyncio.subprocess.PIPE if input_text is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
         )
         stdout, stderr = await process.communicate(
             None if input_text is None else f"{input_text}\n".encode()
@@ -204,7 +205,16 @@ def _state_output(result: _CommandResult) -> str:
     """Extract systemctl's state, normalizing its missing-unit diagnostic."""
     if result.stdout:
         return result.stdout
-    if "not found" in result.stderr.lower() or "not loaded" in result.stderr.lower():
+    error_text = result.stderr.lower()
+    if any(
+        diagnostic in error_text
+        for diagnostic in (
+            "not found",
+            "not loaded",
+            "no such file or directory",
+            "failed to get unit file state",
+        )
+    ):
         return "not-found"
     return "unknown"
 
