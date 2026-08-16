@@ -10,7 +10,7 @@ from rich.text import Text
 def _status_icon(value: str) -> Text:
     match value:
         case "ACTIVE" | "CONNECTED" | "ONLINE":
-            return Text("●", style="green")
+            return Text("⬤", style="green")
         case (
             "PENDING"
             | "ADOPTING"
@@ -20,13 +20,13 @@ def _status_icon(value: str) -> Text:
             | "GETTING_READY"
             | "RESTORING"
         ):
-            return Text("●", style="yellow")
+            return Text("⬤", style="yellow")
         case "INACTIVE" | "DISCONNECTED" | "OFFLINE" | "ADOPTING_TIMEOUT":
-            return Text("●", style="red")
+            return Text("⬤", style="red")
         case "DECLINED" | "BLOCKED" | "FACTORY_RESET" | "DELETING":
-            return Text("●", style="bold red")
+            return Text("⬤", style="bold red")
         case "NULL":
-            return Text("○", style="dim")
+            return Text("◯", style="dim")
         case _:
             return Text("?", style="dim")
 
