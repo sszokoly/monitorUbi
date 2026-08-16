@@ -71,7 +71,7 @@ The included Compose setup builds a multi-stage Alpine image and runs two
 containers:
 
 - `daemon` polls the Mobility API and is the only SQLite writer.
-- `web` serves a read-only Textual dashboard on TCP port `8000`.
+- `web` serves a read-only Textual dashboard on TCP port `8080`.
 
 Create the project-root `.env` file described above, then run:
 
@@ -79,7 +79,7 @@ Create the project-root `.env` file described above, then run:
 docker compose up --build -d
 ```
 
-Open `http://localhost:8000`. To publish a different host port:
+Open `http://localhost:8080`. To publish a different host port:
 
 ```bash
 MONITORUBI_WEB_PORT=8080 docker compose up --build -d
@@ -101,11 +101,11 @@ in the runtime image.
 For a minimal test-lab setup, serve the application with:
 
 ```
-uv run textual serve --host 0.0.0.0 --port 8000 --title monitorUbi --command "python -m monitorUbi"
+uv run textual serve --host 0.0.0.0 --port 8080 --title monitorUbi --command "python -m monitorUbi"
 ```
 
-Open `http://<host-ip>:8000` in a browser. If a host firewall is active, allow
-TCP port `8000`.
+Open `http://<host-ip>:8080` in a browser. If a host firewall is active, allow
+TCP port `8080`.
 
 ## Screenshots
 
