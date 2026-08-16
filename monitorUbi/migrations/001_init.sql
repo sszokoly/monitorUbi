@@ -112,17 +112,6 @@ CREATE TABLE client_samples (
         ON DELETE RESTRICT
 );
 
-CREATE TABLE api_response_log (
-    response_id INTEGER PRIMARY KEY,
-    fetched_at TEXT NOT NULL,
-    endpoint TEXT NOT NULL,
-    workspace_id TEXT,
-    device_id TEXT,
-    err TEXT,
-    trace_id TEXT,
-    payload_json TEXT NOT NULL
-);
-
 CREATE INDEX idx_devices_workspace_id ON devices(workspace_id);
 CREATE INDEX idx_clients_device_id ON clients(device_id);
 CREATE INDEX idx_snmp_events_device_id ON snmp_events(device_id, event_id);
@@ -130,4 +119,3 @@ CREATE INDEX idx_device_samples_device_time ON device_samples(device_id, sampled
 CREATE INDEX idx_device_samples_workspace_time ON device_samples(workspace_id, sampled_at);
 CREATE INDEX idx_client_samples_client_time ON client_samples(device_id, mac, sampled_at);
 CREATE INDEX idx_client_samples_device_time ON client_samples(device_id, sampled_at);
-CREATE INDEX idx_api_response_log_fetched_at ON api_response_log(fetched_at);
