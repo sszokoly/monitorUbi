@@ -1,6 +1,7 @@
 """SQLite migrations and typed snapshot persistence for monitorUbi."""
 
 import json
+import os
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
@@ -66,6 +67,10 @@ def _dashboard_row(row: aiosqlite.Row) -> DeviceDashboardRow:
 
 def configured_database_path(base_directory: str | Path | None = None) -> Path:
     """Return the configured database path or the package-local fallback."""
+    environment_path = os.getenv("MONITORUBI_DATABASE_PATH")
+    if environment_path:
+        return Path(environment_path)
+
     config, config_path = load_config()
     value = get_setting(
         config, "database", "default_database_path", DEFAULT_DATABASE_PATH

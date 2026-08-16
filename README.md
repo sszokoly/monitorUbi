@@ -65,6 +65,37 @@ Service**, then **Install Service** after restarting the TUI. This replaces the
 old unit that executed from the SELinux-restricted project directory under
 `/home`.
 
+## Docker
+
+The included Compose setup builds a multi-stage Alpine image and runs two
+containers:
+
+- `daemon` polls the Mobility API and is the only SQLite writer.
+- `web` serves a read-only Textual dashboard on TCP port `8000`.
+
+Create the project-root `.env` file described above, then run:
+
+```bash
+docker compose up --build -d
+```
+
+Open `http://localhost:8000`. To publish a different host port:
+
+```bash
+MONITORUBI_WEB_PORT=8080 docker compose up --build -d
+```
+
+The named `monitorubi-data` volume persists `/data/monitorUbi.db`. Stop the
+containers without deleting data with:
+
+```bash
+docker compose down
+```
+
+The container does not run systemd and does not expose service-installation
+controls. Build dependencies remain in the builder stage and are not included
+in the runtime image.
+
 ## Web Service
 
 For a minimal test-lab setup, serve the application with:

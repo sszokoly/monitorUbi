@@ -1,0 +1,31 @@
+services:
+  daemon:
+    image: monitorubi:local
+    build:
+      context: .
+    command: daemon
+    env_file:
+      - .env
+    environment:
+      MONITORUBI_DATABASE_PATH: /data/monitorUbi.db
+    volumes:
+      - monitorubi-data:/data
+    restart: unless-stopped
+
+  web:
+    image: monitorubi:local
+    command: web
+    environment:
+      MONITORUBI_DATABASE_PATH: /data/monitorUbi.db
+      MONITORUBI_WEB_HOST: 0.0.0.0
+      MONITORUBI_WEB_PORT: 8080
+    volumes:
+      - monitorubi-data:/data
+    ports:
+      - "${MONITORUBI_WEB_PORT:-8080}:8080"
+    depends_on:
+      - daemon
+    restart: unless-stopped
+
+volumes:
+  monitorubi-data:

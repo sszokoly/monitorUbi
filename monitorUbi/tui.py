@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import sys
 from collections.abc import Sequence
@@ -40,6 +41,8 @@ _SIGNAL_STYLES = {
 }
 DEFAULT_DASHBOARD_REFRESH_INTERVAL_SECONDS = 5.0
 _IS_LINUX = sys.platform.startswith("linux")
+_OBSERVER_MODE = os.getenv("MONITORUBI_TUI_MODE", "").lower() == "observer"
+_SYSTEMD_AVAILABLE = _IS_LINUX and os.getenv("MONITORUBI_DISABLE_SYSTEMD") != "1"
 
 
 def _dashboard_refresh_interval_seconds() -> float:
@@ -797,7 +800,7 @@ class UbiApp(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self._systemd = SystemdService() if _IS_LINUX else None
+        self._systemd = SystemdService() if _SYSTEMD_AVAILABLE else None
         self._service_installed = (
             self._systemd is not None and self._systemd.is_installed()
         )
@@ -806,7 +809,13 @@ class UbiApp(App):
         )
         self._store = self._create_store()
         self._service_enabled = (
-            "unknown" if self._service_installed else "not-found" if _IS_LINUX else "local"
+            "external"
+            if _OBSERVER_MODE
+            else "unknown"
+            if self._service_installed
+            else "not-found"
+            if _SYSTEMD_AVAILABLE
+            else "local"
         )
         self._service_active = "unknown" if self._service_installed else "inactive"
         self._local_api_client: MobilityApiClient | None = None
@@ -818,18 +827,22 @@ class UbiApp(App):
 
     def _create_store(self) -> SqliteSnapshotStore:
         """Create the database store appropriate for the current runtime mode."""
+        if _OBSERVER_MODE:
+            return SqliteSnapshotStore(configured_database_path(), read_only=True)
         if self._service_installed and self._systemd is not None:
             return SqliteSnapshotStore(
                 configured_database_path(self._systemd.deployment_root),
                 read_only=True,
             )
+        if os.getenv("MONITORUBI_DATABASE_PATH"):
+            return SqliteSnapshotStore(configured_database_path())
         return SqliteSnapshotStore(DEFAULT_DATABASE_PATH)
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="service-panel") as service_panel:
             service_panel.border_title = "monitorUbi"
             yield Static(self.service_status_text(), id="service-status")
-            if _IS_LINUX:
+            if _SYSTEMD_AVAILABLE:
                 yield Button(
                     "Install Service",
                     id="service-action",
@@ -886,10 +899,9 @@ class UbiApp(App):
     def footer_text(self) -> Text:
         """Build the footer menu with the action for the current service state."""
         service_action = "Stop" if self._monitor_running else "Start"
-        entries: list[tuple[str, str]] = [
-            ("s", "bold cyan"),
-            (f"={service_action}  ", ""),
-        ]
+        entries: list[tuple[str, str]] = []
+        if not _OBSERVER_MODE:
+            entries.extend((("s", "bold cyan"), (f"={service_action}  ", "")))
         entries.extend(
             (
                 ("q", "bold cyan"),
@@ -984,6 +996,9 @@ class UbiApp(App):
             self.notify(f"Dashboard refresh failed: {error}", severity="error")
 
     def action_toggle_service(self) -> None:
+        if _OBSERVER_MODE:
+            self.notify("Polling is managed by the external daemon.", severity="warning")
+            return
         if self._service_installed and not self._can_manage_service:
             self.notify("Only the service owner can manage monitorUbi.", severity="warning")
             return
@@ -1099,7 +1114,10 @@ class UbiApp(App):
 
     async def _refresh_systemd_state(self) -> None:
         """Refresh local or systemd monitor state in the dashboard."""
-        if self._service_installed and self._systemd is not None:
+        if _OBSERVER_MODE:
+            self._service_enabled = "external"
+            self._service_active = "unknown"
+        elif self._service_installed and self._systemd is not None:
             status = await self._systemd.status()
             self._service_enabled = status.enabled
             self._service_active = status.active
@@ -1111,7 +1129,7 @@ class UbiApp(App):
         try:
             self.query_one("#service-status", Static).update(self.service_status_text())
             self.query_one("#footer-menu", Static).update(self.footer_text())
-            if _IS_LINUX:
+            if _SYSTEMD_AVAILABLE:
                 button = self.query_one("#service-action", Button)
                 action = self._service_button_action()
                 button.label = (
@@ -1142,6 +1160,8 @@ class UbiApp(App):
 
     def _service_status_display(self) -> tuple[str, str, str]:
         """Map the active local or system service to dashboard vocabulary."""
+        if _OBSERVER_MODE:
+            return "?", "external", "yellow"
         if self._monitor_running:
             return "√", "running", "green1"
         if not self._service_installed or self._service_active == "inactive":
