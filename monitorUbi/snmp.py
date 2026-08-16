@@ -51,6 +51,7 @@ class TrapEvent(str, Enum):
     DEVICE_CONNECTED = "deviceConnected"
     CLIENTS_OFFLINE = "clientsOffline"
     CLIENTS_ONLINE = "clientsOnline"
+    WAN_SOURCE_CHANGED = "wanSourceChanged"
 
 
 _EVENT_OIDS = {
@@ -58,6 +59,7 @@ _EVENT_OIDS = {
     TrapEvent.DEVICE_CONNECTED: f"{ENTERPRISE_OID}.0.2",
     TrapEvent.CLIENTS_OFFLINE: f"{ENTERPRISE_OID}.0.3",
     TrapEvent.CLIENTS_ONLINE: f"{ENTERPRISE_OID}.0.4",
+    TrapEvent.WAN_SOURCE_CHANGED: f"{ENTERPRISE_OID}.0.5",
 }
 
 _MESSAGE_OID = f"{ENTERPRISE_OID}.1.1"
@@ -71,6 +73,14 @@ class DeviceTrap:
     device_id: UUID
     device_name: str
     observed_at: datetime
+    previous_wan_source: str | None = None
+    current_wan_source: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.event is TrapEvent.WAN_SOURCE_CHANGED and (
+            not self.previous_wan_source or not self.current_wan_source
+        ):
+            raise ValueError("WAN-source traps require previous and current sources")
 
     @property
     def message(self) -> str:
@@ -85,6 +95,11 @@ class DeviceTrap:
                 event_text = "clients OFFLINE"
             case TrapEvent.CLIENTS_ONLINE:
                 event_text = "clients ONLINE"
+            case TrapEvent.WAN_SOURCE_CHANGED:
+                event_text = (
+                    "WAN source changed from "
+                    f"{self.previous_wan_source} to {self.current_wan_source}"
+                )
         return f"Device {self.device_name} {event_text} at {timestamp}"
 
 

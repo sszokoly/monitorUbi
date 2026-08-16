@@ -144,7 +144,7 @@ class MonitorService:
         self._poll_interval_seconds = poll_interval_seconds
         self._on_refresh = on_refresh
         self._trap_sender = trap_sender or SnmpTrapSender()
-        self._device_transition_state: dict[UUID, tuple[str, int]] = {}
+        self._device_transition_state: dict[UUID, tuple[str, int, str]] = {}
         self._request_pacer = _RequestPacer(requests_per_minute)
         self._request_semaphore = asyncio.Semaphore(max_concurrent_requests)
         self._poll_task: asyncio.Task[None] | None = None
@@ -299,15 +299,17 @@ class MonitorService:
             current_client_count = sum(
                 client.connection_status == "ONLINE" for client in snapshot.clients
             )
+            current_wan_source = snapshot.device.wan_source
             previous = self._device_transition_state.get(snapshot.device.id)
             self._device_transition_state[snapshot.device.id] = (
                 current_state,
                 current_client_count,
+                current_wan_source,
             )
             if previous is None:
                 continue
 
-            previous_state, previous_client_count = previous
+            previous_state, previous_client_count, previous_wan_source = previous
             observed_at = max(snapshot.device_observed_at, snapshot.clients_observed_at)
             if current_state == "DISCONNECTED" and previous_state != "DISCONNECTED":
                 traps.append(
@@ -341,6 +343,20 @@ class MonitorService:
                         observed_at,
                     )
                 )
+            if (
+                previous_wan_source
+                and current_wan_source
+                and previous_wan_source != current_wan_source
+            ):
+                traps.append(
+                    self._device_trap(
+                        TrapEvent.WAN_SOURCE_CHANGED,
+                        snapshot,
+                        snapshot.device_observed_at,
+                        previous_wan_source=previous_wan_source,
+                        current_wan_source=current_wan_source,
+                    )
+                )
 
         if not traps:
             return
@@ -355,12 +371,17 @@ class MonitorService:
         event: TrapEvent,
         snapshot: DeviceSnapshot,
         observed_at: datetime,
+        *,
+        previous_wan_source: str | None = None,
+        current_wan_source: str | None = None,
     ) -> DeviceTrap:
         return DeviceTrap(
             event=event,
             device_id=snapshot.device.id,
             device_name=snapshot.device.name,
             observed_at=observed_at,
+            previous_wan_source=previous_wan_source,
+            current_wan_source=current_wan_source,
         )
 
 
