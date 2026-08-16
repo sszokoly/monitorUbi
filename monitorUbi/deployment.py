@@ -13,7 +13,7 @@ _IGNORED_FILENAMES = {"app.log", _MANIFEST_NAME}
 _IGNORED_SUFFIXES = (".db", ".db-wal", ".db-shm")
 
 
-def deploy_runtime(source_root: str | Path, deployment_root: str | Path) -> None:
+def copy_runtime_files(source_root: str | Path, deployment_root: str | Path) -> None:
     """Copy source and virtualenv while preserving deployed state files."""
     source = Path(source_root).resolve()
     destination = Path(deployment_root).resolve()

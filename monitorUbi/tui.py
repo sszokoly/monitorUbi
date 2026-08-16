@@ -1,5 +1,6 @@
 import asyncio
 import re
+import sys
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from math import log10
@@ -14,8 +15,15 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Input, Static
 from textual_hires_canvas import Canvas, TextAlign
 from textual_plot import HiResMode, NumericAxisFormatter, PlotWidget
+from monitorUbi.client import MobilityApiClient
 from monitorUbi.config import get_setting, load_config
-from monitorUbi.db import SqliteSnapshotStore, database_size
+from monitorUbi.db import (
+    DEFAULT_DATABASE_PATH,
+    SqliteSnapshotStore,
+    configured_database_path,
+    database_size,
+)
+from monitorUbi.service import MonitorService, SyncSummary
 from monitorUbi.systemd import SystemdError, SystemdService
 from monitorUbi.utils import memory_usage, uptime_seconds_to_string
 from monitorUbi.view_models import DeviceDashboardViewModel
@@ -31,6 +39,7 @@ _SIGNAL_STYLES = {
     "STRONG": "green1",
 }
 DEFAULT_DASHBOARD_REFRESH_INTERVAL_SECONDS = 5.0
+_IS_LINUX = sys.platform.startswith("linux")
 
 
 def _dashboard_refresh_interval_seconds() -> float:
@@ -506,7 +515,11 @@ class DeviceDetailsScreen(Screen):
     }
     """
 
-    BINDINGS = [("escape", "back", "Back")]
+    BINDINGS = [
+        ("enter", "back", "Back"),
+        ("escape", "back", "Back"),
+        ("q", "ignore_quit", ""),
+    ]
 
     def __init__(self, store: SqliteSnapshotStore, device_id: str) -> None:
         super().__init__()
@@ -711,6 +724,9 @@ class DeviceDetailsScreen(Screen):
     def action_back(self) -> None:
         self.app.pop_screen()
 
+    def action_ignore_quit(self) -> None:
+        """Prevent quitting the application from the device detail screen."""
+
 
 class UbiApp(App):
     """Monitoring dashboard for Ubiquiti UMR devices."""
@@ -781,26 +797,45 @@ class UbiApp(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self._store = SqliteSnapshotStore(read_only=True)
-        self._systemd = SystemdService()
-        self._can_manage_service = self._systemd.can_manage()
-        self._service_enabled = "unknown"
-        self._service_active = "unknown"
+        self._systemd = SystemdService() if _IS_LINUX else None
+        self._service_installed = (
+            self._systemd is not None and self._systemd.is_installed()
+        )
+        self._can_manage_service = (
+            self._systemd.can_manage() if self._systemd is not None else False
+        )
+        self._store = self._create_store()
+        self._service_enabled = (
+            "unknown" if self._service_installed else "not-found" if _IS_LINUX else "local"
+        )
+        self._service_active = "unknown" if self._service_installed else "inactive"
+        self._local_api_client: MobilityApiClient | None = None
+        self._local_monitor_service: MonitorService | None = None
         self._dashboard_refresh_interval_seconds = _dashboard_refresh_interval_seconds()
         self._device_table_signature: tuple[DeviceDashboardViewModel, ...] | None = None
         self._filter_text = ""
         self._filter_pattern: re.Pattern[str] | None = None
 
+    def _create_store(self) -> SqliteSnapshotStore:
+        """Create the database store appropriate for the current runtime mode."""
+        if self._service_installed and self._systemd is not None:
+            return SqliteSnapshotStore(
+                configured_database_path(self._systemd.deployment_root),
+                read_only=True,
+            )
+        return SqliteSnapshotStore(DEFAULT_DATABASE_PATH)
+
     def compose(self) -> ComposeResult:
         with Horizontal(id="service-panel") as service_panel:
             service_panel.border_title = "monitorUbi"
             yield Static(self.service_status_text(), id="service-status")
-            yield Button(
-                "Install Service",
-                id="service-action",
-                variant="primary",
-                compact=True,
-            )
+            if _IS_LINUX:
+                yield Button(
+                    "Install Service",
+                    id="service-action",
+                    variant="primary",
+                    compact=True,
+                )
 
         devices_panel = Container(
             DataTable(
@@ -837,7 +872,7 @@ class UbiApp(App):
             (" | RAM Usage: ", "grey70"),
             (f"{memory_usage()}", "turquoise2"),
             (" | DB Size: ", "grey70"),
-            (f"{database_size()}", "turquoise2"),
+            (f"{database_size(self._store.database_path)}", "turquoise2"),
             (" | Workspaces: ", "grey70"),
             (f"{workspace_count}", "turquoise2"),
             (" | Devices: ", "grey70"),
@@ -850,10 +885,11 @@ class UbiApp(App):
 
     def footer_text(self) -> Text:
         """Build the footer menu with the action for the current service state."""
-        service_action = "Stop" if self._service_active == "active" else "Start"
-        entries: list[tuple[str, str]] = []
-        if self._can_manage_service:
-            entries.extend((("s", "bold cyan"), (f"={service_action}  ", "")))
+        service_action = "Stop" if self._monitor_running else "Start"
+        entries: list[tuple[str, str]] = [
+            ("s", "bold cyan"),
+            (f"={service_action}  ", ""),
+        ]
         entries.extend(
             (
                 ("q", "bold cyan"),
@@ -865,6 +901,13 @@ class UbiApp(App):
             )
         )
         return Text.assemble(*entries)
+
+    @property
+    def _monitor_running(self) -> bool:
+        """Whether the active local or system monitor is running."""
+        if self._service_installed:
+            return self._service_active == "active"
+        return self._local_monitor_service is not None
 
     async def on_mount(self) -> None:
         self.title = "monitorUbi"
@@ -927,7 +970,8 @@ class UbiApp(App):
     async def _refresh_dashboard(self) -> None:
         """Refresh persisted dashboard data and system service state."""
         try:
-            if self._store.database_exists:
+            await self._sync_installation_mode()
+            if self._store.database_exists or not self._store.read_only:
                 await self._store.refresh_current_counts()
                 await self._store.refresh_history_days()
                 await self.refresh_device_table()
@@ -940,18 +984,15 @@ class UbiApp(App):
             self.notify(f"Dashboard refresh failed: {error}", severity="error")
 
     def action_toggle_service(self) -> None:
-        if not self._can_manage_service:
+        if self._service_installed and not self._can_manage_service:
             self.notify("Only the service owner can manage monitorUbi.", severity="warning")
             return
-        if self._service_enabled == "not-found":
-            self.notify("Install monitorUbi before starting it.", severity="warning")
-            return
 
-        action = "stop" if self._service_active == "active" else "start"
+        action = "stop" if self._monitor_running else "start"
         prompt = (
-            "Stop monitorUbi service?"
+            "Stop monitorUbi polling?"
             if action == "stop"
-            else "Start monitorUbi service?"
+            else "Start monitorUbi polling?"
         )
         self.push_screen(
             ConfirmationScreen(prompt),
@@ -970,72 +1011,148 @@ class UbiApp(App):
     def _after_start_stop_confirmation(self, confirmed: bool | None, action: str) -> None:
         """Run the confirmed keyboard action after the modal has closed."""
         if confirmed:
-            self._request_privileged_action(action)
+            if self._service_installed:
+                self._request_privileged_action(action)
+            else:
+                self._request_local_action(action)
+
+    @work(exclusive=True)
+    async def _request_local_action(self, action: str) -> None:
+        """Start or stop polling inside a non-installed TUI process."""
+        if action == "start":
+            await self._start_local_monitor()
+        else:
+            await self._stop_local_monitor()
+        await self._refresh_systemd_state()
+
+    async def _start_local_monitor(self) -> None:
+        """Start local polling against the project-directory database."""
+        if self._local_monitor_service is not None:
+            return
+        try:
+            api_client = MobilityApiClient()
+        except ValueError as error:
+            self.notify(str(error), severity="error")
+            return
+
+        monitor_service = MonitorService(
+            api_client,
+            self._store,
+            on_refresh=self._refresh_after_local_sync,
+        )
+        self._local_api_client = api_client
+        self._local_monitor_service = monitor_service
+        monitor_service.start()
+
+    async def _stop_local_monitor(self) -> None:
+        """Stop local polling and close its API client."""
+        monitor_service = self._local_monitor_service
+        api_client = self._local_api_client
+        self._local_monitor_service = None
+        self._local_api_client = None
+        if monitor_service is not None:
+            await monitor_service.stop()
+        if api_client is not None:
+            await api_client.aclose()
+
+    async def _refresh_after_local_sync(self, _: SyncSummary) -> None:
+        """Refresh immediately after an in-process poll completes."""
+        await self._refresh_dashboard()
 
     @work(exclusive=True)
     async def _request_privileged_action(self, action: str) -> None:
+        systemd = self._systemd
+        if systemd is None:
+            return
         password = await self.push_screen_wait(SudoPasswordScreen())
         if password is None:
             return
 
         completed = False
         try:
-            await self._systemd.authenticate(password)
+            await systemd.authenticate(password)
             match action:
                 case "install":
-                    await self._systemd.install()
+                    await self._stop_local_monitor()
+                    await systemd.install()
                 case "enable":
-                    await self._systemd.enable()
+                    await systemd.enable()
                 case "uninstall":
-                    await self._systemd.uninstall()
+                    await systemd.uninstall()
                 case "start":
-                    await self._systemd.start()
+                    await systemd.start()
                 case "stop":
-                    await self._systemd.stop()
+                    await systemd.stop()
             completed = True
             self.notify(f"monitorUbi service {action} completed.")
         except SystemdError as error:
             self.notify(f"Service {action} failed: {error}", severity="error")
         finally:
             try:
-                await self._systemd.clear_authentication()
+                await systemd.clear_authentication()
             except SystemdError as error:
                 self.notify(f"Could not clear sudo authentication: {error}", severity="error")
+            await self._sync_installation_mode()
             await self._refresh_systemd_state()
             if completed and action in {"install", "uninstall"}:
                 self.query_one("#device-table", DataTable).focus()
 
     async def _refresh_systemd_state(self) -> None:
-        """Refresh the dashboard from the current system-wide unit state."""
-        status = await self._systemd.status()
-        self._service_enabled = status.enabled
-        self._service_active = status.active
+        """Refresh local or systemd monitor state in the dashboard."""
+        if self._service_installed and self._systemd is not None:
+            status = await self._systemd.status()
+            self._service_enabled = status.enabled
+            self._service_active = status.active
+        else:
+            self._service_enabled = "not-found" if _IS_LINUX else "local"
+            self._service_active = (
+                "active" if self._local_monitor_service is not None else "inactive"
+            )
         try:
             self.query_one("#service-status", Static).update(self.service_status_text())
             self.query_one("#footer-menu", Static).update(self.footer_text())
-            button = self.query_one("#service-action", Button)
-            action = self._service_button_action()
-            button.label = (
-                self._service_button_label(action)
-                if self._can_manage_service
-                else "Observer Mode"
-            )
-            button.disabled = action is None or not self._can_manage_service
+            if _IS_LINUX:
+                button = self.query_one("#service-action", Button)
+                action = self._service_button_action()
+                button.label = (
+                    self._service_button_label(action)
+                    if self._can_manage_service
+                    else "Observer Mode"
+                )
+                button.disabled = action is None or not self._can_manage_service
         except NoMatches:
             return
 
+    async def _sync_installation_mode(self) -> None:
+        """Switch database ownership mode when the Linux unit is added or removed."""
+        systemd = self._systemd
+        if systemd is None:
+            return
+        installed = systemd.is_installed()
+        if installed == self._service_installed:
+            return
+
+        if installed:
+            await self._stop_local_monitor()
+        self._service_installed = installed
+        self._can_manage_service = systemd.can_manage()
+        self._store = self._create_store()
+        self._device_table_signature = None
+        self.query_one("#device-table", DataTable).clear()
+
     def _service_status_display(self) -> tuple[str, str, str]:
-        """Map systemctl's active state to the dashboard status vocabulary."""
-        if self._service_active == "active":
+        """Map the active local or system service to dashboard vocabulary."""
+        if self._monitor_running:
             return "√", "running", "green1"
-        if self._service_active == "inactive":
+        if not self._service_installed or self._service_active == "inactive":
             return "X", "stopped", "red1"
         return "?", self._service_active, "yellow"
 
     def _service_button_action(self) -> str | None:
         """Return the requested management action for the enabled unit state."""
+        if not self._service_installed:
+            return "install"
         return {
-            "not-found": "install",
             "disabled": "enable",
             "enabled": "uninstall",
         }.get(self._service_enabled)
@@ -1051,6 +1168,9 @@ class UbiApp(App):
             "enable": "Enable Service",
             "uninstall": "Uninstall Service",
         }.get(action, "Unavailable")
+
+    async def on_unmount(self) -> None:
+        await self._stop_local_monitor()
 
     def action_filter(self) -> None:
         self.push_screen(FilterScreen(self._filter_text), self._apply_device_filter)

@@ -1,9 +1,12 @@
 import locale
 import os
 import sys
-import termios
 from contextlib import contextmanager
-from typing import Any
+
+try:
+    import termios
+except ImportError:  # Windows has no POSIX terminal-state API.
+    termios = None
 
 def get_available_terminal_types():
     """
@@ -48,6 +51,10 @@ def terminal_context(term_type="xterm-256color"):
     Args:
         term_type: The terminal type to change to
     """
+    if os.name != "posix":
+        yield
+        return
+
     old_term = change_terminal(term_type)
     old_locale = locale.setlocale(locale.LC_ALL, None)
 
@@ -76,7 +83,7 @@ def application_context():
     
     Sets up logging, configures terminal, and ensures proper cleanup.
     """
-    if not sys.stdin.isatty():
+    if termios is None or not sys.stdin.isatty():
         yield
         return
 

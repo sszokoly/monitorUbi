@@ -64,19 +64,21 @@ def _dashboard_row(row: aiosqlite.Row) -> DeviceDashboardRow:
     }
 
 
-def _configured_database_path() -> Path:
+def configured_database_path(base_directory: str | Path | None = None) -> Path:
     """Return the configured database path or the package-local fallback."""
     config, config_path = load_config()
     value = get_setting(
         config, "database", "default_database_path", DEFAULT_DATABASE_PATH
     )
     path = Path(value)
-    return path if path.is_absolute() or config is None else config_path.parent / path
+    if path.is_absolute() or config is None:
+        return path
+    return Path(base_directory) / path if base_directory is not None else config_path.parent / path
 
 
 def database_size(database_path: str | Path | None = None) -> str:
     """Return the main SQLite file and WAL sidecars as a display-ready size."""
-    path = Path(database_path) if database_path is not None else _configured_database_path()
+    path = Path(database_path) if database_path is not None else configured_database_path()
     size_bytes = sum(
         candidate.stat().st_size
         for candidate in (
@@ -173,7 +175,7 @@ class SqliteSnapshotStore:
         self, database_path: str | Path | None = None, *, read_only: bool = False
     ) -> None:
         self._database_path = (
-            Path(database_path) if database_path is not None else _configured_database_path()
+            Path(database_path) if database_path is not None else configured_database_path()
         )
         self._workspace_count = 0
         self._device_count = 0
@@ -205,6 +207,16 @@ class SqliteSnapshotStore:
     def database_exists(self) -> bool:
         """Whether the configured SQLite database is available to this store."""
         return self._database_path.exists()
+
+    @property
+    def database_path(self) -> Path:
+        """Return the SQLite path used by this store."""
+        return self._database_path
+
+    @property
+    def read_only(self) -> bool:
+        """Whether this store opens SQLite without write access."""
+        return self._read_only
 
     async def refresh_current_counts(self) -> None:
         """Load current workspace, device, and online-client counts from SQLite."""

@@ -2,8 +2,10 @@
 default_timeout_seconds = 5.0
 
 [database]
-# Shared by the checkout TUI and the systemd deployment.
-default_database_path = "/opt/monitorUbi/monitorUbi/monitorUbi.db"
+default_database_path = "monitorUbi.db"
+
+[systemd]
+deployment_root = "/opt/monitorUbi"
 
 [service]
 default_poll_interval_seconds = 60.0

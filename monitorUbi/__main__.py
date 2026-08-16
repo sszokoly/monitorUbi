@@ -1,16 +1,12 @@
-import os
 from monitorUbi.logging_setup import configure_logging
-from monitorUbi.terminal import application_context, terminal_context
 
 
-def main():
+def main() -> None:
     configure_logging("tui")
-    with application_context():
-        with terminal_context("xterm-256color"):
-            from monitorUbi.tui import UbiApp
-            
-            app = UbiApp()
-            app.run()
+    from monitorUbi.tui import UbiApp
+
+    UbiApp().run()
+
 
 if __name__ == "__main__":
     main()

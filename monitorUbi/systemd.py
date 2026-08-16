@@ -8,7 +8,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from monitorUbi.deployment import deploy_runtime
+from monitorUbi.config import get_setting, load_config
+from monitorUbi.deployment import copy_runtime_files
 
 
 UNIT_NAME = "monitorUbi.service"
@@ -39,10 +40,23 @@ class SystemdService:
     def __init__(
         self,
         project_root: str | Path | None = None,
-        deployment_root: str | Path = DEPLOYMENT_ROOT,
+        deployment_root: str | Path | None = None,
     ) -> None:
         self._project_root = Path(project_root or Path(__file__).resolve().parents[1])
-        self._deployment_root = Path(deployment_root)
+        self._deployment_root = (
+            Path(deployment_root)
+            if deployment_root is not None
+            else _configured_deployment_root()
+        )
+
+    @property
+    def deployment_root(self) -> Path:
+        """Return the configured system deployment directory."""
+        return self._deployment_root
+
+    def is_installed(self) -> bool:
+        """Whether the system-wide unit file is installed."""
+        return UNIT_PATH.is_file()
 
     async def status(self) -> SystemdStatus:
         """Read systemctl states without treating nonzero status checks as errors."""
@@ -78,7 +92,7 @@ class SystemdService:
         """Deploy, install, enable, and start the generated system unit."""
         unit_file = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False)
         try:
-            await self._deploy_runtime()
+            await self._deploy_service_runtime()
             with unit_file:
                 unit_file.write(self.unit_text())
             await self._run_privileged("install", "-m", "0644", unit_file.name, UNIT_PATH)
@@ -139,7 +153,7 @@ class SystemdService:
         """Return the virtual-environment interpreter inside the deployment."""
         return self._deployment_root / ".venv" / "bin" / "python"
 
-    async def _deploy_runtime(self) -> None:
+    async def _deploy_service_runtime(self) -> None:
         """Copy source and dependencies into /opt with an executable SELinux label."""
         owner = f"{os.geteuid()}:{os.getegid()}"
         await self._run_privileged(
@@ -155,13 +169,34 @@ class SystemdService:
         )
         await self._run_privileged("chown", "-R", owner, self._deployment_root)
         try:
-            deploy_runtime(self._project_root, self._deployment_root)
+            copy_runtime_files(self._project_root, self._deployment_root)
         except OSError as error:
             raise SystemdError(f"Could not deploy application files: {error}") from error
         except RuntimeError as error:
             raise SystemdError(str(error)) from error
-        await self._ensure_selinux_context()
-        await self._run_privileged("restorecon", "-RF", self._deployment_root)
+        if await self._selinux_enabled():
+            await self._ensure_selinux_context()
+            await self._run_privileged("restorecon", "-RF", self._deployment_root)
+        result = await self._run(
+            self._deployment_python,
+            "-c",
+            "import monitorUbi.daemon",
+        )
+        if result.returncode:
+            raise SystemdError(
+                f"Deployed runtime validation failed: {_command_error(result)}"
+            )
+
+    async def _selinux_enabled(self) -> bool:
+        """Return whether SELinux is enabled in enforcing or permissive mode."""
+        try:
+            result = await self._run("getenforce")
+        except FileNotFoundError:
+            return False
+        return result.returncode == 0 and result.stdout.lower() in {
+            "enforcing",
+            "permissive",
+        }
 
     async def _ensure_selinux_context(self) -> None:
         """Assign a persistent executable context to the system deployment."""
@@ -226,6 +261,16 @@ def _command_error(result: _CommandResult) -> str:
 def _quote(value: str | Path) -> str:
     """Quote a systemd unit argument only when its path requires it."""
     return shlex.quote(str(value))
+
+
+def _configured_deployment_root() -> Path:
+    """Return the TOML deployment root or the internal Linux fallback."""
+    config, config_path = load_config()
+    value = get_setting(config, "systemd", "deployment_root", DEPLOYMENT_ROOT)
+    path = Path(value)
+    if path.is_absolute() or config is None:
+        return path
+    return config_path.parent / path
 
 
 if __name__ == "__main__":

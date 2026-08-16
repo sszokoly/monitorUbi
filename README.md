@@ -18,28 +18,47 @@ is ignored by Git. Restrict access to the file:
 chmod 600 .env
 ```
 
-The **Install Service** deployment copies this file to `/opt/monitorUbi/.env`,
-where the system service loads it.
+The Linux **Install Service** deployment copies this file to the configured
+`systemd.deployment_root`, where the system service loads it.
 
-## System Service
+## Local Operation
 
-Use the **Install Service** button in the TUI to:
+On Windows, macOS, and Linux without an installed `monitorUbi.service`, the TUI
+runs in local mode. Press `s` to start or stop polling inside the TUI process.
+The local writable SQLite database is `monitorUbi/monitorUbi.db` in the project
+directory. Closing the TUI stops local polling.
 
-- Deploy the application and its virtual environment to `/opt/monitorUbi`.
-- Apply the SELinux `usr_t` file context.
+## Linux System Service
+
+The **Install Service** button is available only on Linux. Use it to:
+
+- Deploy the application and its virtual environment to the configured root
+  (`/opt/monitorUbi` by default).
+- Apply the SELinux `usr_t` file context when SELinux is enabled.
 - Enable and start `monitorUbi.service`.
 
-The monitor service then runs independently of the TUI. Both the TUI and
-daemon use the shared SQLite database at
-`/opt/monitorUbi/monitorUbi/monitorUbi.db`.
+The monitor service then runs independently of the TUI. Its deployment root is
+configured in `config.toml`:
+
+```toml
+[database]
+default_database_path = "monitorUbi.db"
+
+[systemd]
+deployment_root = "/opt/monitorUbi"
+```
+
+With these defaults, both the TUI and daemon use
+`/opt/monitorUbi/monitorUbi.db`. The daemon is the only writer and TUI sessions
+open this database read-only. Pressing `s` starts or stops the systemd service.
 
 Users other than the deployment owner run the TUI in read-only observer mode.
 They can view the shared dashboard but cannot manage the system service.
 
-Only `root` and the Unix user who owns `/opt/monitorUbi` can install, enable,
-start, stop, or uninstall the singleton `monitorUbi.service`; these operations
-require that user's sudo password. When `/opt/monitorUbi` does not yet exist,
-the first user to install the service becomes the deployment owner.
+Only `root` and the Unix user who owns the configured deployment root can
+install, enable, start, stop, or uninstall the singleton `monitorUbi.service`;
+these operations require that user's sudo password. When the deployment root
+does not yet exist, the first user to install the service becomes its owner.
 
 For an installation created before this deployment flow, select **Uninstall
 Service**, then **Install Service** after restarting the TUI. This replaces the
